@@ -1,0 +1,12 @@
+{
+    "asc_file": "data/input.asc",
+    "dbc_files": [
+        "data/dbc1.dbc",
+        "data/dbc2.dbc"
+    ],
+    "output_dir": "output",
+    "sample_interval": 0.1,
+    "group_size": 5,
+    "csv_encoding": "utf-8-sig",
+    "debug": false
+}
