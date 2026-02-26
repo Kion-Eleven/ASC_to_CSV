@@ -1,0 +1,12 @@
+{
+    "asc_file": "C:/Users/601091/Desktop/canproj/can_20260130103358(800V 6#).asc",
+    "dbc_files": [
+        "C:/Users/601091/Desktop/canproj/800V_BMS_PCAN_V2.5.3.dbc",
+        "C:/Users/601091/Desktop/canproj/800V_BMS_ICAN_V2.5.4.dbc"
+    ],
+    "output_dir": "C:/Users/601091/Desktop/canproj/csv_output_new",
+    "sample_interval": 0.1,
+    "group_size": 5,
+    "csv_encoding": "utf-8-sig",
+    "debug": false
+}
