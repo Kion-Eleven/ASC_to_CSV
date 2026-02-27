@@ -139,11 +139,24 @@ class ASCParser:
             msg = msg_info['message']
             dbc_name = msg_info['dbc_name']
             
-            decoded = msg.decode(data)
+            decoded = msg.decode(data, decode_choices=False)
             
             for signal_name, value in decoded.items():
                 full_signal_name = f"{dbc_name}::{msg.name}::{signal_name}"
-                self.sampled_data[sampled_time][full_signal_name].append(value)
+                
+                if isinstance(value, (int, float)):
+                    self.sampled_data[sampled_time][full_signal_name].append(value)
+                else:
+                    signal_obj = msg.get_signal_by_name(signal_name)
+                    if signal_obj and signal_obj.choices:
+                        for num_val, str_val in signal_obj.choices.items():
+                            if str_val == value:
+                                self.sampled_data[sampled_time][full_signal_name].append(num_val)
+                                break
+                        else:
+                            self.sampled_data[sampled_time][full_signal_name].append(value)
+                    else:
+                        self.sampled_data[sampled_time][full_signal_name].append(value)
                 self.found_signals.add(full_signal_name)
                 
         except ValueError as e:
