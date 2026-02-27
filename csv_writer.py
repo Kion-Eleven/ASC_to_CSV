@@ -202,16 +202,10 @@ class CSVWriter:
             writer = csv.writer(csvfile)
             writer.writerow(header)
             
-            group_count = 0
             for timestamp in sorted_timestamps:
                 data = filled_data.get(timestamp, {})
                 row = self._build_row(timestamp, sorted_signals, data)
                 writer.writerow(row)
-                group_count += 1
-                
-                if group_count >= self.group_size:
-                    writer.writerow([])
-                    group_count = 0
         
         print(f"  创建文件: {csv_filename}")
         return csv_filename
