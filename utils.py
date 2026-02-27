@@ -6,6 +6,7 @@
 
 import re
 from typing import Any
+from decimal import Decimal, ROUND_HALF_UP
 
 
 def extract_batp_group(signal_name: str) -> str:
@@ -47,12 +48,18 @@ def extract_batp_group(signal_name: str) -> str:
     return "Other"
 
 
-def safe_value(value: Any) -> Any:
+def safe_value(value: Any, precision: int = 6) -> Any:
     """
     安全转换值，确保可以写入CSV文件
     
+    对于浮点数，会进行精度舍入以避免浮点数精度问题
+    例如：15.600000000000001 -> 15.6
+         100.0 -> 100
+         0.0 -> 0
+    
     Args:
         value: 原始值
+        precision: 浮点数精度（小数位数）
         
     Returns:
         Any: 转换后的值
@@ -62,15 +69,39 @@ def safe_value(value: Any) -> Any:
         ''
         >>> safe_value(123.456)
         123.456
+        >>> safe_value(15.600000000000001)
+        15.6
+        >>> safe_value(100.0)
+        100
+        >>> safe_value(0.0)
+        0
         >>> safe_value('Standby')
         'Standby'
     """
     if value is None:
         return ""
-    if isinstance(value, (int, float)):
+    
+    if isinstance(value, float):
+        try:
+            d = Decimal(str(value))
+            quantize_str = '0.' + '0' * precision
+            rounded = d.quantize(Decimal(quantize_str), rounding=ROUND_HALF_UP)
+            float_val = float(rounded)
+            if float_val == int(float_val):
+                return int(float_val)
+            return float_val
+        except Exception:
+            rounded = round(value, precision)
+            if rounded == int(rounded):
+                return int(rounded)
+            return rounded
+    
+    if isinstance(value, int):
         return value
+    
     if isinstance(value, str):
         return value
+    
     return str(value)
 
 

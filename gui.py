@@ -120,11 +120,6 @@ class ASCToCSVApp:
         self.sample_interval_entry = ttk.Entry(param_frame, textvariable=self.sample_interval_var, width=15)
         self.sample_interval_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=2)
         
-        ttk.Label(param_frame, text="分组大小:").grid(row=0, column=2, sticky=tk.W, padx=(20, 0), pady=2)
-        self.group_size_var = tk.StringVar(value="5")
-        self.group_size_entry = ttk.Entry(param_frame, textvariable=self.group_size_var, width=15)
-        self.group_size_entry.grid(row=0, column=3, sticky=tk.W, padx=5, pady=2)
-        
         ttk.Label(param_frame, text="CSV编码:").grid(row=1, column=0, sticky=tk.W, pady=2)
         self.encoding_var = tk.StringVar(value="utf-8-sig")
         encoding_combo = ttk.Combobox(param_frame, textvariable=self.encoding_var, width=12, state="readonly")
@@ -132,7 +127,7 @@ class ASCToCSVApp:
         encoding_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
         
         self.debug_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(param_frame, text="调试模式", variable=self.debug_var).grid(row=1, column=2, columnspan=2, sticky=tk.W, padx=(20, 0), pady=2)
+        ttk.Checkbutton(param_frame, text="调试模式", variable=self.debug_var).grid(row=1, column=2, sticky=tk.W, padx=(20, 0), pady=2)
     
     def _create_action_section(self, parent):
         """创建操作按钮区域"""
@@ -242,7 +237,6 @@ class ASCToCSVApp:
                     self.dbc_listbox.insert(tk.END, dbc)
                 self.output_entry.insert(0, self.config.output_dir)
                 self.sample_interval_var.set(str(self.config.sample_interval))
-                self.group_size_var.set(str(self.config.group_size))
                 self.encoding_var.set(self.config.csv_encoding)
                 self.debug_var.set(self.config.debug)
                 self._log("已加载配置文件")
@@ -260,7 +254,6 @@ class ASCToCSVApp:
             "dbc_files": list(self.dbc_listbox.get(0, tk.END)),
             "output_dir": self.output_entry.get(),
             "sample_interval": float(self.sample_interval_var.get()),
-            "group_size": int(self.group_size_var.get()),
             "csv_encoding": self.encoding_var.get(),
             "debug": self.debug_var.get()
         }
@@ -325,15 +318,6 @@ class ASCToCSVApp:
             messagebox.showerror("错误", "采样间隔必须是有效的数字")
             return False
         
-        try:
-            group_size = int(self.group_size_var.get())
-            if group_size <= 0:
-                messagebox.showerror("错误", "分组大小必须大于0")
-                return False
-        except ValueError:
-            messagebox.showerror("错误", "分组大小必须是有效的整数")
-            return False
-        
         return True
     
     def _start_convert(self):
@@ -369,7 +353,6 @@ class ASCToCSVApp:
                 dbc_files=list(self.dbc_listbox.get(0, tk.END)),
                 output_dir=self.output_entry.get(),
                 sample_interval=float(self.sample_interval_var.get()),
-                group_size=int(self.group_size_var.get()),
                 csv_encoding=self.encoding_var.get(),
                 debug=self.debug_var.get()
             )
