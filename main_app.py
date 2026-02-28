@@ -9,7 +9,7 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import csv
 import gc
 import traceback
@@ -21,6 +21,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 import numpy as np
 
+try:
+    from scipy.interpolate import make_interp_spline
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 from config import Config, get_config
 from dbc_loader import DBCLoader
 from asc_parser import ASCParser
@@ -30,6 +36,14 @@ from csv_writer import CSVWriter
 
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['lines.antialiased'] = True
+plt.rcParams['patch.antialiased'] = True
+
+
+MULTI_SELECT_COLUMNS = [
+    'MaxCellTemp', 'MinCellTemp', 'PackSoC', 'HvBusVlt', 
+    'BranchCrnt', 'PackFltLvl', 'MaxCellVlt', 'MinCellVlt'
+]
 
 
 class CSVDataLoader:
@@ -97,6 +111,17 @@ class CSVDataLoader:
             if values and all(isinstance(v, (int, float)) for v in values):
                 numeric_cols.append(col)
         return numeric_cols
+    
+    def get_multi_select_columns(self) -> List[str]:
+        """获取多列显示时可选择的列（仅包含指定的8个列）"""
+        numeric_cols = self.get_numeric_columns()
+        result = []
+        for target in MULTI_SELECT_COLUMNS:
+            for col in numeric_cols:
+                if target in col:
+                    result.append(col)
+                    break
+        return result
 
 
 class MainApplication:
@@ -104,7 +129,7 @@ class MainApplication:
     
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("ASC to CSV 转换与可视化工具 v2.0.0")
+        self.root.title("ASC to CSV 转换与可视化工具 v2.1.0")
         self.root.geometry("1400x900")
         self.root.minsize(1000, 700)
         
@@ -119,6 +144,11 @@ class MainApplication:
         self.scroll_position: float = 0.0
         self.crosshair_enabled: bool = False
         self.output_dir: Optional[str] = None
+        self.smooth_curve: bool = True
+        
+        self.compare_data_loaders: Dict[str, CSVDataLoader] = {}
+        self.compare_files: List[str] = []
+        self.compare_columns: List[str] = []
         
         self._setup_styles()
         self._create_widgets()
@@ -149,6 +179,7 @@ class MainApplication:
         
         self._create_convert_tab()
         self._create_visualize_tab()
+        self._create_compare_tab()
     
     def _create_convert_tab(self):
         convert_frame = ttk.Frame(self.notebook, padding="10")
@@ -244,6 +275,12 @@ class MainApplication:
         
         self.multi_select_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(column_frame, text="多列显示", variable=self.multi_select_var, 
+                        command=self._on_multi_select_changed).pack(side=tk.LEFT, padx=5)
+        
+        self.multi_column_frame = ttk.Frame(column_frame)
+        
+        self.smooth_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(column_frame, text="平滑曲线", variable=self.smooth_var,
                         command=self._update_chart).pack(side=tk.LEFT, padx=5)
         
         zoom_frame = ttk.Frame(control_frame)
@@ -299,6 +336,68 @@ class MainApplication:
         self.status_label.pack(side=tk.LEFT)
         self.coord_label = ttk.Label(status_frame, text="")
         self.coord_label.pack(side=tk.RIGHT)
+    
+    def _create_compare_tab(self):
+        compare_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(compare_frame, text="数据对比")
+        
+        control_frame = ttk.LabelFrame(compare_frame, text="对比设置", padding="10")
+        control_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        file_frame = ttk.Frame(control_frame)
+        file_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(file_frame, text="选择文件:").pack(side=tk.LEFT)
+        
+        self.compare_file_listbox = tk.Listbox(file_frame, height=3, selectmode=tk.MULTIPLE, width=40)
+        self.compare_file_listbox.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(file_frame, text="刷新文件", command=self._refresh_compare_files).pack(side=tk.LEFT, padx=5)
+        
+        column_frame = ttk.Frame(control_frame)
+        column_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(column_frame, text="选择数据列:").pack(side=tk.LEFT)
+        
+        self.compare_column_vars: Dict[str, tk.BooleanVar] = {}
+        self.compare_column_frame = ttk.Frame(column_frame)
+        self.compare_column_frame.pack(side=tk.LEFT, padx=5)
+        
+        for i, col_name in enumerate(MULTI_SELECT_COLUMNS):
+            var = tk.BooleanVar(value=False)
+            self.compare_column_vars[col_name] = var
+            cb = ttk.Checkbutton(self.compare_column_frame, text=col_name, variable=var)
+            cb.grid(row=0, column=i, padx=5)
+        
+        btn_frame = ttk.Frame(control_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(btn_frame, text="生成对比图", command=self._generate_compare_chart).pack(side=tk.LEFT, padx=5)
+        
+        self.smooth_compare_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(btn_frame, text="平滑曲线", variable=self.smooth_compare_var).pack(side=tk.LEFT, padx=5)
+        
+        chart_frame = ttk.LabelFrame(compare_frame, text="对比图表", padding="5")
+        chart_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.compare_figure = Figure(figsize=(12, 6), dpi=100)
+        self.compare_ax = self.compare_figure.add_subplot(111)
+        
+        self.compare_canvas = FigureCanvasTkAgg(self.compare_figure, master=chart_frame)
+        self.compare_canvas.draw()
+        
+        compare_canvas_widget = self.compare_canvas.get_tk_widget()
+        compare_canvas_widget.pack(fill=tk.BOTH, expand=True)
+        
+        compare_toolbar_frame = ttk.Frame(chart_frame)
+        compare_toolbar_frame.pack(fill=tk.X)
+        self.compare_toolbar = NavigationToolbar2Tk(self.compare_canvas, compare_toolbar_frame)
+        self.compare_toolbar.update()
+        
+        compare_status_frame = ttk.Frame(compare_frame)
+        compare_status_frame.pack(fill=tk.X, pady=(5, 0))
+        self.compare_status_label = ttk.Label(compare_status_frame, text="请选择文件和数据列进行对比")
+        self.compare_status_label.pack(side=tk.LEFT)
     
     def _log(self, message: str):
         try:
@@ -480,14 +579,32 @@ class MainApplication:
             )
             
             self._log("")
-            self._log("=" * 50)
+            self._log("=" * 60)
             self._log("转换完成！")
             self._log(f"输出目录: {config.output_dir}")
-            self._log(f"生成文件数: {len(created_files)}")
-            self._log("=" * 50)
+            self._log("")
+            self._log("生成的文件列表：")
+            self._log("-" * 60)
+            
+            for file_path in created_files:
+                file_name = os.path.basename(file_path)
+                signal_count = 0
+                try:
+                    with open(file_path, 'r', encoding=config.csv_encoding) as f:
+                        reader = csv.reader(f)
+                        header = next(reader)
+                        signal_count = len(header) - 1
+                except:
+                    pass
+                self._log(f"  {file_name}: {signal_count} 个信号")
+            
+            self._log("-" * 60)
+            self._log(f"总计生成 {len(created_files)} 个文件")
+            self._log("=" * 60)
             
             self.output_dir = config.output_dir
             self.root.after(0, lambda: self._refresh_csv_files())
+            self.root.after(0, lambda: self._refresh_compare_files())
             self.root.after(0, lambda: messagebox.showinfo("成功", f"转换完成！\n输出目录: {config.output_dir}"))
             
         except Exception as e:
@@ -515,6 +632,13 @@ class MainApplication:
                 self.file_combo.set(csv_files[0])
                 self._on_file_selected(None)
     
+    def _refresh_compare_files(self):
+        if self.output_dir and os.path.exists(self.output_dir):
+            csv_files = [f for f in os.listdir(self.output_dir) if f.endswith('.csv')]
+            self.compare_file_listbox.delete(0, tk.END)
+            for f in csv_files:
+                self.compare_file_listbox.insert(tk.END, f)
+    
     def _on_file_selected(self, event):
         selected = self.file_combo.get()
         if self.output_dir and selected:
@@ -528,7 +652,12 @@ class MainApplication:
         
         if self.data_loader.load(file_path):
             self.current_file = file_path
-            numeric_cols = self.data_loader.get_numeric_columns()
+            
+            if self.multi_select_var.get():
+                numeric_cols = self.data_loader.get_multi_select_columns()
+            else:
+                numeric_cols = self.data_loader.get_numeric_columns()
+            
             self.column_combo['values'] = numeric_cols
             if numeric_cols:
                 self.column_combo.set(numeric_cols[0])
@@ -541,6 +670,10 @@ class MainApplication:
     def _on_column_selected(self, event):
         self.current_column = self.column_combo.get()
         self._update_chart()
+    
+    def _on_multi_select_changed(self):
+        if self.current_file:
+            self._load_csv_file(self.current_file)
     
     def _on_zoom_changed(self, value):
         self.zoom_level = float(value)
@@ -581,6 +714,7 @@ class MainApplication:
             if self.coord_annotation:
                 self.coord_annotation.remove()
                 self.coord_annotation = None
+            self.coord_label.config(text="")
             self.canvas.draw()
     
     def _on_mouse_move(self, event):
@@ -595,8 +729,7 @@ class MainApplication:
                 self.coord_annotation.remove()
                 self.coord_annotation = None
             self.coord_label.config(text="")
-            if event.inaxes:
-                self.canvas.draw()
+            self.canvas.draw()
             return
         
         x, y = event.xdata, event.ydata
@@ -614,21 +747,52 @@ class MainApplication:
             self.crosshair_hline = self.ax.axhline(y=y, color='gray', linestyle='--', linewidth=1, alpha=0.7)
         
         if self.coord_annotation:
-            self.coord_annotation.set_position((x, y))
-            self.coord_annotation.set_text(f"({x:.3f}, {y:.3f})")
+            self.coord_annotation.xy = (x, y)
+            self.coord_annotation.set_position((x + 0.02, y + 0.02))
+            self.coord_annotation.set_text(f"X: {x:.3f}\nY: {y:.3f}")
         else:
             self.coord_annotation = self.ax.annotate(
-                f"({x:.3f}, {y:.3f})",
+                f"X: {x:.3f}\nY: {y:.3f}",
                 xy=(x, y),
                 xytext=(10, 10),
                 textcoords='offset points',
                 fontsize=9,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
-                arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0')
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', edgecolor='gray', alpha=0.9),
+                horizontalalignment='left',
+                verticalalignment='bottom'
             )
         
         self.coord_label.config(text=f"坐标: X={x:.4f}, Y={y:.4f}")
         self.canvas.draw_idle()
+    
+    def _smooth_data(self, x_data: List, y_data: List, num_points: int = 300) -> Tuple[np.ndarray, np.ndarray]:
+        """使用样条插值平滑数据"""
+        if not HAS_SCIPY:
+            return np.array(x_data), np.array(y_data)
+        
+        if len(x_data) < 4:
+            return np.array(x_data), np.array(y_data)
+        
+        x_arr = np.array(x_data)
+        y_arr = np.array(y_data)
+        
+        sort_idx = np.argsort(x_arr)
+        x_sorted = x_arr[sort_idx]
+        y_sorted = y_arr[sort_idx]
+        
+        unique_x, unique_idx = np.unique(x_sorted, return_index=True)
+        unique_y = y_sorted[unique_idx]
+        
+        if len(unique_x) < 4:
+            return unique_x, unique_y
+        
+        try:
+            x_new = np.linspace(unique_x.min(), unique_x.max(), num_points)
+            spline = make_interp_spline(unique_x, unique_y, k=3)
+            y_new = spline(x_new)
+            return x_new, y_new
+        except:
+            return unique_x, unique_y
     
     def _update_chart(self):
         if not self.current_column or not self.data_loader.data:
@@ -643,7 +807,7 @@ class MainApplication:
         time_data = self.data_loader.data[time_col]
         
         if self.multi_select_var.get():
-            selected_columns = list(self.column_combo['values'])[:10]
+            selected_columns = self.data_loader.get_multi_select_columns()
         else:
             selected_columns = [self.current_column]
         
@@ -665,7 +829,13 @@ class MainApplication:
                     y_valid = [y_data[i] for i in valid_indices]
                     
                     label = col.split('[')[0] if '[' in col else col
-                    self.ax.plot(x_valid, y_valid, label=label, linewidth=1)
+                    label = label.split('::')[-1] if '::' in label else label
+                    
+                    if self.smooth_var.get() and len(x_valid) > 10:
+                        x_smooth, y_smooth = self._smooth_data(x_valid, y_valid)
+                        self.ax.plot(x_smooth, y_smooth, label=label, linewidth=2, antialiased=True)
+                    else:
+                        self.ax.plot(x_valid, y_valid, label=label, linewidth=1.5, antialiased=True)
         
         self.ax.set_xlabel(time_col, fontsize=10)
         self.ax.set_ylabel("数值", fontsize=10)
@@ -684,6 +854,78 @@ class MainApplication:
         
         self.figure.tight_layout()
         self.canvas.draw()
+    
+    def _generate_compare_chart(self):
+        selected_files = self.compare_file_listbox.curselection()
+        if not selected_files:
+            messagebox.showwarning("提示", "请至少选择一个文件")
+            return
+        
+        selected_columns = [col for col, var in self.compare_column_vars.items() if var.get()]
+        if not selected_columns:
+            messagebox.showwarning("提示", "请至少选择一个数据列")
+            return
+        
+        self.compare_ax.clear()
+        
+        colors = plt.cm.tab10.colors
+        color_idx = 0
+        
+        file_names = [self.compare_file_listbox.get(i) for i in selected_files]
+        
+        for file_name in file_names:
+            file_path = os.path.join(self.output_dir, file_name)
+            loader = CSVDataLoader()
+            
+            if not loader.load(file_path):
+                continue
+            
+            time_col = loader.get_time_column()
+            if not time_col:
+                continue
+            
+            time_data = loader.data[time_col]
+            
+            for target_col in selected_columns:
+                matching_col = None
+                for col in loader.columns:
+                    if target_col in col:
+                        matching_col = col
+                        break
+                
+                if not matching_col:
+                    continue
+                
+                y_data = loader.data[matching_col]
+                valid_indices = [i for i, v in enumerate(y_data) if v is not None]
+                
+                if valid_indices:
+                    x_valid = [time_data[i] for i in valid_indices]
+                    y_valid = [y_data[i] for i in valid_indices]
+                    
+                    label = f"{file_name.replace('.csv', '')} - {target_col}"
+                    
+                    if self.smooth_compare_var.get() and len(x_valid) > 10:
+                        x_smooth, y_smooth = self._smooth_data(x_valid, y_valid)
+                        self.compare_ax.plot(x_smooth, y_smooth, label=label, 
+                                            linewidth=2, color=colors[color_idx % len(colors)],
+                                            antialiased=True)
+                    else:
+                        self.compare_ax.plot(x_valid, y_valid, label=label, 
+                                            linewidth=1.5, color=colors[color_idx % len(colors)],
+                                            antialiased=True)
+                    color_idx += 1
+        
+        self.compare_ax.set_xlabel("时间 [s]", fontsize=10)
+        self.compare_ax.set_ylabel("数值", fontsize=10)
+        self.compare_ax.set_title("多文件数据对比", fontsize=12)
+        self.compare_ax.legend(loc='upper right', fontsize=8)
+        self.compare_ax.grid(True, linestyle='--', alpha=0.7)
+        
+        self.compare_figure.tight_layout()
+        self.compare_canvas.draw()
+        
+        self.compare_status_label.config(text=f"已生成对比图 - 文件: {len(file_names)}, 数据列: {len(selected_columns)}")
     
     def _on_closing(self):
         if self.is_converting:
