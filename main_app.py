@@ -417,6 +417,25 @@ class MainApplication:
         except tk.TclError:
             pass
     
+    def _update_progress(self, progress: float, line_count: int):
+        """更新解析进度"""
+        try:
+            content = self.log_text.get("1.0", tk.END)
+            lines = content.strip().split('\n')
+            for i in range(len(lines) - 1, -1, -1):
+                if lines[i].startswith("进度:"):
+                    lines[i] = f"进度: {progress:.1f}% (已处理 {line_count:,} 行)"
+                    break
+            
+            self.log_text.configure(state=tk.NORMAL)
+            self.log_text.delete("1.0", tk.END)
+            self.log_text.insert(tk.END, '\n'.join(lines) + '\n')
+            self.log_text.see(tk.END)
+            self.log_text.configure(state=tk.DISABLED)
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+    
     def _browse_asc(self):
         filename = filedialog.askopenfilename(title="选择ASC文件", filetypes=[("ASC文件", "*.asc"), ("所有文件", "*.*")])
         if filename:
@@ -550,8 +569,13 @@ class MainApplication:
             self._log("")
             
             self._log("正在解析ASC文件...")
+            self._log("进度: 0%")
+            
+            def progress_callback(progress: float, line_count: int):
+                self.root.after(0, lambda: self._update_progress(progress, line_count))
+            
             asc_parser = ASCParser(sample_interval=config.sample_interval, debug=config.debug)
-            if not asc_parser.parse(config.asc_file, dbc_loader.message_map):
+            if not asc_parser.parse(config.asc_file, dbc_loader.message_map, progress_callback):
                 self._log("ASC文件解析失败")
                 return
             
@@ -562,7 +586,12 @@ class MainApplication:
             self._log("正在处理数据...")
             data_processor = DataProcessor()
             data_processor.aggregate(asc_parser.sampled_data)
+            
+            signal_count = len(asc_parser.found_signals)
+            self._log(f"  聚合完成，共 {signal_count} 个信号")
+            
             data_processor.classify_signals(asc_parser.found_signals)
+            self._log(f"  分类完成，共 {len(data_processor.sorted_groups)} 个分组")
             self._log("")
             
             self._log("正在创建CSV文件...")
