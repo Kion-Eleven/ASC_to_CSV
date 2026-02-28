@@ -41,7 +41,7 @@ plt.rcParams['patch.antialiased'] = True
 
 
 MULTI_SELECT_COLUMNS = [
-    'MaxCellTemp', 'MinCellTemp', 'PackSoC', 'HvBusVlt', 
+    'MaxCellTemp', 'MinCellTemp', 'PackSOC', 'HvBusVlt', 
     'BranchCrnt', 'PackFltLvl', 'MaxCellVlt', 'MinCellVlt'
 ]
 
@@ -732,38 +732,89 @@ class MainApplication:
             self.canvas.draw()
             return
         
-        x, y = event.xdata, event.ydata
-        if x is None or y is None:
+        x_mouse, y_mouse = event.xdata, event.ydata
+        if x_mouse is None or y_mouse is None:
             return
         
         if self.crosshair_vline:
-            self.crosshair_vline.set_xdata([x, x])
+            self.crosshair_vline.set_xdata([x_mouse, x_mouse])
         else:
-            self.crosshair_vline = self.ax.axvline(x=x, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+            self.crosshair_vline = self.ax.axvline(x=x_mouse, color='gray', linestyle='--', linewidth=1, alpha=0.7)
         
-        if self.crosshair_hline:
-            self.crosshair_hline.set_ydata([y, y])
+        y_curve = self._get_curve_y_at_x(x_mouse)
+        if y_curve is not None:
+            y_display = y_curve
+            if self.crosshair_hline:
+                self.crosshair_hline.set_ydata([y_curve, y_curve])
+            else:
+                self.crosshair_hline = self.ax.axhline(y=y_curve, color='gray', linestyle='--', linewidth=1, alpha=0.7)
         else:
-            self.crosshair_hline = self.ax.axhline(y=y, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+            y_display = y_mouse
+            if self.crosshair_hline:
+                self.crosshair_hline.set_ydata([y_mouse, y_mouse])
+            else:
+                self.crosshair_hline = self.ax.axhline(y=y_mouse, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+        
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        x_range = xlim[1] - xlim[0]
+        y_range = ylim[1] - ylim[0]
+        
+        offset_x = x_range * 0.02
+        offset_y = y_range * 0.02
+        
+        annot_x = x_mouse + offset_x
+        annot_y = y_display - offset_y
+        
+        if annot_x > xlim[1] - x_range * 0.15:
+            annot_x = x_mouse - x_range * 0.15
+        if annot_y < ylim[0] + y_range * 0.1:
+            annot_y = y_display + y_range * 0.1
         
         if self.coord_annotation:
-            self.coord_annotation.xy = (x, y)
-            self.coord_annotation.set_position((x + 0.02, y + 0.02))
-            self.coord_annotation.set_text(f"X: {x:.3f}\nY: {y:.3f}")
+            self.coord_annotation.xy = (x_mouse, y_display)
+            self.coord_annotation.set_position((annot_x, annot_y))
+            self.coord_annotation.set_text(f"X: {x_mouse:.3f}\nY: {y_display:.3f}")
         else:
             self.coord_annotation = self.ax.annotate(
-                f"X: {x:.3f}\nY: {y:.3f}",
-                xy=(x, y),
-                xytext=(10, 10),
-                textcoords='offset points',
+                f"X: {x_mouse:.3f}\nY: {y_display:.3f}",
+                xy=(x_mouse, y_display),
+                xytext=(annot_x, annot_y),
                 fontsize=9,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', edgecolor='gray', alpha=0.9),
                 horizontalalignment='left',
-                verticalalignment='bottom'
+                verticalalignment='top'
             )
         
-        self.coord_label.config(text=f"坐标: X={x:.4f}, Y={y:.4f}")
+        self.coord_label.config(text=f"坐标: X={x_mouse:.4f}, Y={y_display:.4f}")
         self.canvas.draw_idle()
+    
+    def _get_curve_y_at_x(self, x_target: float) -> Optional[float]:
+        """获取当前图表中曲线在指定x坐标处的y值"""
+        if not self.current_column or not self.data_loader.data:
+            return None
+        
+        time_col = self.data_loader.get_time_column()
+        if not time_col:
+            return None
+        
+        time_data = self.data_loader.data[time_col]
+        
+        if self.multi_select_var.get():
+            selected_columns = self.data_loader.get_multi_select_columns()
+        else:
+            selected_columns = [self.current_column]
+        
+        for col in selected_columns:
+            if col in self.data_loader.data:
+                y_data = self.data_loader.data[col]
+                
+                for i, t in enumerate(time_data):
+                    if t is not None and abs(t - x_target) < 0.001:
+                        if y_data[i] is not None:
+                            return y_data[i]
+        
+        return None
     
     def _smooth_data(self, x_data: List, y_data: List, num_points: int = 300) -> Tuple[np.ndarray, np.ndarray]:
         """使用样条插值平滑数据"""
