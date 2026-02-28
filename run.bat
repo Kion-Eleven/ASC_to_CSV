@@ -4,7 +4,7 @@ REM ASC to CSV 运行脚本 (Windows)
 REM ============================================================
 
 echo ========================================
-echo   ASC to CSV 转换工具
+echo   ASC to CSV 转换与可视化工具
 echo ========================================
 echo.
 
@@ -19,12 +19,12 @@ REM 激活虚拟环境
 call venv\Scripts\activate.bat
 
 REM 运行程序
-echo [信息] 启动转换程序...
+echo [信息] 启动程序...
 echo.
-python main.py
+python main_app.py
 
 echo.
 echo ========================================
-echo   转换完成
+echo   程序已退出
 echo ========================================
 pause

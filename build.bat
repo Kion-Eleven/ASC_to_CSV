@@ -27,7 +27,7 @@ echo [STEP 2] Building executable...
 echo Please wait, this may take a few minutes...
 echo.
 
-pyinstaller asc_to_csv.spec --clean
+pyinstaller main_app.spec --clean
 
 if errorlevel 1 (
     echo.
@@ -46,7 +46,8 @@ echo.
 echo Usage:
 echo   1. Copy dist\ASCtoCSV.exe to any folder
 echo   2. Double-click to run
-echo   3. Config file will be created on first run
+echo   3. Use "Data Convert" tab to convert ASC to CSV
+echo   4. Use "Data Visualize" tab to view charts
 echo.
 
 set /p OPEN_DIR="Open output folder? (Y/N): "
