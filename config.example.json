@@ -1,5 +1,10 @@
 {
     "asc_file": "data/input.asc",
+    "asc_files": [
+        "data/part1.asc",
+        "data/part2.asc"
+    ],
+    "multi_file_mode": false,
     "dbc_files": [
         "data/dbc1.dbc",
         "data/dbc2.dbc"
