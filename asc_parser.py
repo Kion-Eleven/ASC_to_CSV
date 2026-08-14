@@ -8,6 +8,7 @@ ASC文件解析模块
 import re
 import gc
 import os
+from datetime import datetime
 from typing import Dict, Set, Tuple, Optional, Callable
 import cantools
 
@@ -27,6 +28,8 @@ class ASCParser:
     ASC_PATTERN = re.compile(
         r'^(\d+\.\d+)\s+(\d+)\s+([0-9A-Fa-f]+x?)\s+(Rx|Tx)\s+d\s+(\d+)\s+(([0-9A-Fa-f]{2}\s*)+)$'
     )
+    DATE_PATTERN = re.compile(r'^date\s+(.+)$')
+    DATE_FORMAT = 'date %a %b %d %I:%M:%S %p %Y'
     MAX_MEMORY_SIGNALS = 10000
     MAX_MEMORY_TIMESTAMPS = 100000
     PROGRESS_UPDATE_INTERVAL = 10000
@@ -45,6 +48,7 @@ class ASCParser:
         self.sampled_data: Dict[float, Dict[str, list]] = {}
         self.found_signals: Set[str] = set()
         self.original_count: int = 0
+        self.start_time: float = 0.0
         self._memory_warning_shown = False
         self._line_count: int = 0
         self._file_size: int = 0
@@ -92,7 +96,12 @@ class ASCParser:
                 return False
             
             with file_handle as f:
-                bytes_read = 0
+                # 读取第一行，解析起始时间
+                first_line = f.readline()
+                self._line_count += 1
+                self._parse_date_line(first_line)
+                
+                bytes_read = len(first_line.encode('utf-8', errors='ignore'))
                 for line in f:
                     self._line_count += 1
                     bytes_read += len(line.encode('utf-8', errors='ignore'))
@@ -139,6 +148,31 @@ class ASCParser:
         if signal_count > self.MAX_MEMORY_SIGNALS or timestamp_count > self.MAX_MEMORY_TIMESTAMPS:
             print(f"警告：数据量较大（{timestamp_count}个时间点，{signal_count}个信号），可能占用较多内存")
             self._memory_warning_shown = True
+    
+    def _parse_date_line(self, line: str) -> None:
+        """
+        解析ASC文件第一行的 date 时间
+        
+        ASC文件第一行格式示例: "date Thu Aug 13 01:52:11 PM 2026"
+        
+        Args:
+            line: ASC文件的第一行文本
+        """
+        line = line.strip()
+        match = self.DATE_PATTERN.match(line)
+        if not match:
+            if self.debug:
+                print(f"  ASC文件未找到 date 行，将使用时间戳从0开始")
+            return
+        
+        try:
+            dt = datetime.strptime(line, self.DATE_FORMAT)
+            self.start_time = dt.timestamp()
+            if self.debug:
+                print(f"  解析ASC起始时间: {dt} (epoch: {self.start_time})")
+        except ValueError as e:
+            if self.debug:
+                print(f"  date行解析失败: {e}，将使用时间戳从0开始")
     
     def _parse_line(self, line: str, message_map: Dict) -> None:
         """

@@ -25,6 +25,7 @@
 import os
 import re
 import csv
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Set
 from collections import defaultdict
 
@@ -62,7 +63,8 @@ class EnhancedCSVWriter:
         output_dir: str,
         encoding: str = "utf-8-sig",
         fill_interval: float = 0.5,
-        overwrite: bool = False
+        overwrite: bool = False,
+        start_time: float = 0.0
     ):
         """
         初始化CSV写入器
@@ -82,6 +84,9 @@ class EnhancedCSVWriter:
             overwrite: 是否覆盖已存在的文件
                 - False（默认）：跳过已存在的文件
                 - True：覆盖已存在的文件
+            start_time: ASC文件起始时间（epoch秒）
+                - 默认0.0，表示时间戳从0开始
+                - 设置为ASC文件第一行date解析出的时间，则时间戳从该时间开始
         
         Examples:
             >>> writer = EnhancedCSVWriter('./output')
@@ -91,6 +96,7 @@ class EnhancedCSVWriter:
         self.encoding = encoding
         self.fill_interval = fill_interval
         self.overwrite = overwrite
+        self.start_time = start_time
         
         self.created_files: Set[str] = set()
         self.existing_files: Set[str] = set()
@@ -128,14 +134,14 @@ class EnhancedCSVWriter:
         """
         填充缺失值
         
-        使用同一时间区间内的有效值填充空值。这对于处理采样数据中的
-        间隙非常有用，可以提高数据的连续性。
-        
         填充策略：
-            1. 遍历所有时间戳，将每个时间戳分配到对应的时间区间
-            2. 对于每个时间区间，收集该区间内所有信号的有效值
-            3. 对于缺失值，使用同一区间内最近的有效值填充
-            4. 如果整个区间都没有有效值，保持为空
+            1. 遍历所有时间戳，将每个时间戳分配到对应的时间区间（默认 0.5s 宽度）
+            2. 对于每个时间区间，收集该区间内所有信号的有效值（取最后一个）
+            3. **跨区间前向填充（ffill）**：按时间顺序遍历区间，
+               若某区间内某信号没有有效值，则使用前一区间该信号的最近值。
+               这样保证信号不会因为恰好错过某个 0.5s 窗口而出现整桶空白。
+            4. 对于每个时间戳：若原值缺失，使用所在区间的最近有效值填充；
+               若区间内完全没出现过且前序区间也没出现过，保持为 None
         
         Args:
             sorted_timestamps: 排序后的时间戳列表
@@ -146,17 +152,16 @@ class EnhancedCSVWriter:
         
         Returns:
             Dict[float, Dict[str, Any]]: 填充后的数据
-                - 键：时间戳
-                - 值：{信号名称: 信号值} 字典（缺失值已被填充）
         
         Note:
-            - 填充只使用同一时间区间内的值，不会跨区间填充
-            - 如果某个信号在整个区间内都没有有效值，该位置保持为None
+            - 同时间区间内取最后一个有效值
+            - 跨时间区间做前向延续（last-observation-carried-forward）
+            - 第一个出现有效值之前的所有位置保持为 None（无法向后填充）
         """
         bucket_values: Dict[int, Dict[str, Any]] = defaultdict(dict)
         bucket_timestamps: Dict[int, List[float]] = defaultdict(list)
         
-        # 收集每个时间区间内的有效值
+        # 步骤 1：收集每个时间区间内的有效值（最后一个值覆盖）
         for timestamp in sorted_timestamps:
             bucket = self._get_time_bucket(timestamp)
             bucket_timestamps[bucket].append(timestamp)
@@ -166,7 +171,33 @@ class EnhancedCSVWriter:
                 if sig_name in original_data and original_data[sig_name] is not None:
                     bucket_values[bucket][sig_name] = original_data[sig_name]
         
-        # 填充空值
+        # 步骤 2：跨区间前向填充（ffill）——消除"整 0.5s 桶空白"
+        if bucket_values:
+            sorted_buckets = sorted(bucket_values.keys())
+            if sorted_buckets:
+                # 还需要把所有真正出现过 timestamp 的桶（即便空）也纳入 ffill 顺序
+                all_buckets = sorted(set(bucket_timestamps.keys()))
+                last_values: Dict[str, Any] = {}
+                # 从最早到最晚的桶依次推进
+                min_bucket = min(all_buckets) if all_buckets else sorted_buckets[0]
+                max_bucket = max(all_buckets) if all_buckets else sorted_buckets[-1]
+                for b in range(min_bucket, max_bucket + 1):
+                    cur = bucket_values.get(b)
+                    if cur:
+                        # 当前桶出现过新值：更新 last_values（只更新当前桶有值的那些信号）
+                        # 同时把上一桶有但本桶没有的信号也带入 cur，保证本桶内 fill 可用
+                        for sig_name, prev_val in last_values.items():
+                            if sig_name not in cur:
+                                cur[sig_name] = prev_val
+                        # 然后 last_values = cur（全量拷贝，保留所有已知信号）
+                        last_values = dict(last_values, **cur)
+                    else:
+                        # 本桶完全没出现任何信号：把前一桶的所有信号 last_values 灌入 bucket_values[b]
+                        if last_values:
+                            bucket_values[b] = dict(last_values)
+                    # bucket_values[b] 现在对每个信号要么有本桶新值，要么有前向延续值
+        
+        # 步骤 3：逐行构建填充结果
         filled_data = {}
         for timestamp in sorted_timestamps:
             bucket = self._get_time_bucket(timestamp)
@@ -175,13 +206,10 @@ class EnhancedCSVWriter:
             
             for sig_name in signals:
                 if sig_name in original_data and original_data[sig_name] is not None:
-                    # 保留原始值
                     filled_row[sig_name] = original_data[sig_name]
-                elif sig_name in bucket_values[bucket]:
-                    # 使用同区间的有效值填充
+                elif bucket in bucket_values and sig_name in bucket_values[bucket]:
                     filled_row[sig_name] = bucket_values[bucket][sig_name]
                 else:
-                    # 无法填充，保持为空
                     filled_row[sig_name] = None
             
             filled_data[timestamp] = filled_row
@@ -522,7 +550,7 @@ class EnhancedCSVWriter:
             >>> print(header)
             ['Time[s]', 'Voltage[V]']
         """
-        header = ["Time[s]"]
+        header = ["Time" if self.start_time > 0 else "Time[s]"]
         for sig_name in signals:
             unit = signal_info.get(sig_name, {}).get('unit', '')
             short_name = sig_name.split('::')[-1]
@@ -557,7 +585,15 @@ class EnhancedCSVWriter:
             - 使用 safe_value() 处理信号值，确保格式正确
             - 缺失值用空字符串表示
         """
-        row = [round(timestamp, 1)]
+        if self.start_time > 0:
+            total = timestamp + self.start_time
+            whole = int(total)
+            frac = round((total - whole) * 10)
+            dt = datetime.fromtimestamp(whole)
+            time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+            row = [f"{time_str}.{frac}"]
+        else:
+            row = [round(timestamp, 1)]
         for sig_name in signals:
             if sig_name in data and data[sig_name] is not None:
                 row.append(safe_value(data[sig_name]))

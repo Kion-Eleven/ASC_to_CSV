@@ -220,7 +220,8 @@ class MultiASCConverter:
         writer = EnhancedCSVWriter(
             output_dir=temp_output_dir,
             encoding=self.config.csv_encoding,
-            overwrite=True
+            overwrite=True,
+            start_time=parser.start_time
         )
 
         write_result = writer.write_all_groups(

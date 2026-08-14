@@ -86,7 +86,11 @@ class GroupExtractor:
         self.discovered_groups: Set[str] = set()
         self.group_mapping: Dict[str, Optional[str]] = {}
         self._custom_patterns: List[re.Pattern] = []
-    
+
+    def add_custom_pattern(self, pattern: str) -> None:
+        """Register a custom regex pattern (first capture group = group name)."""
+        self._custom_patterns.append(re.compile(pattern, re.IGNORECASE))
+
     def extract_from_signal_name(self, signal_name: str) -> Optional[str]:
         """
         从信号名称中提取组名称
@@ -120,27 +124,43 @@ class GroupExtractor:
         if not signal_name:
             return None
         
-        # 检查缓存
         if signal_name in self.group_mapping:
             return self.group_mapping[signal_name]
-        
-        # 执行正则匹配
-        match = self.VALID_GROUP_PATTERN.search(signal_name)
-        
-        if match:
-            group_name = match.group(1)
-            # 统一转换为大写，确保分组一致性
-            group_name = group_name.upper()
-            # 清理组名称中的无效字符
-            group_name = self._sanitize_group_name(group_name)
-            # 缓存结果
-            self.group_mapping[signal_name] = group_name
+
+        if self.strategy == ExtractionStrategy.CUSTOM_PATTERN:
+            group_name = self._extract_custom_pattern(signal_name)
+        elif self.strategy == ExtractionStrategy.SIGNAL_PREFIX:
+            group_name = self._extract_signal_prefix(signal_name)
+        else:
+            group_name = self._extract_batp_pattern(signal_name)
+
+        self.group_mapping[signal_name] = group_name
+        if group_name:
             self.discovered_groups.add(group_name)
-            return group_name
-        
-        # 未匹配成功，缓存为 None
-        self.group_mapping[signal_name] = None
+        return group_name
+
+    def _extract_batp_pattern(self, signal_name: str) -> Optional[str]:
+        match = self.VALID_GROUP_PATTERN.search(signal_name)
+        if not match:
+            return None
+        return self._sanitize_group_name(match.group(1).upper())
+
+    def _extract_custom_pattern(self, signal_name: str) -> Optional[str]:
+        for pattern in self._custom_patterns:
+            match = pattern.search(signal_name)
+            if match:
+                return self._sanitize_group_name(match.group(1).upper())
         return None
+
+    def _extract_signal_prefix(self, signal_name: str) -> Optional[str]:
+        parts = signal_name.split("::")
+        if len(parts) < 3:
+            return None
+        signal_part = parts[-1].strip()
+        match = re.match(r"^([A-Za-z]+\d*)", signal_part)
+        if not match:
+            return None
+        return self._sanitize_group_name(match.group(1).upper())
     
     def _sanitize_group_name(self, group_name: str) -> str:
         """

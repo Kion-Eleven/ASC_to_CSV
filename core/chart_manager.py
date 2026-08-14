@@ -16,8 +16,10 @@ import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from datetime import datetime
 
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
@@ -256,12 +258,72 @@ class ChartManager:
     
     def update(self):
         """更新图表显示"""
+        self._apply_xaxis_datetime_format()
         self.figure.tight_layout()
         self.canvas.draw()
     
     def draw_idle(self):
         """空闲时重绘"""
+        self._apply_xaxis_datetime_format()
         self.canvas.draw_idle()
+    
+    def _apply_xaxis_datetime_format(self):
+        """
+        若 X 轴数据为 epoch 秒（2001 年以后的大数值），
+        自动将 X 轴格式化为日期时间字符串显示，便于用户阅读。
+        """
+        try:
+            xlim = self.ax.get_xlim()
+            if xlim is None:
+                return
+            x_min, x_max = xlim
+            # epoch 秒起始 1e9 ≈ 2001-09-09，小于 1e9 视为相对秒数不格式化
+            if x_min is None or x_max is None or x_min < 1e9:
+                return
+
+            # 使用 matplotlib 日期格式化器（将 epoch 秒视为 Unix 时间 -> 转换为 matplotlib 日期数）
+            # 这里设置 FuncFormatter：显示时用 datetime.fromtimestamp
+            def _epoch_formatter(x, pos):
+                try:
+                    whole = int(x)
+                    frac = x - whole
+                    # 保留 0.1s 精度
+                    frac_digit = int(round(frac * 10)) % 10
+                    dt = datetime.fromtimestamp(whole)
+                    return dt.strftime('%Y-%m-%d %H:%M:%S') + f'.{frac_digit}'
+                except (OSError, OverflowError, ValueError):
+                    return f"{x:.1f}"
+
+            from matplotlib.ticker import FuncFormatter
+            self.ax.xaxis.set_major_formatter(FuncFormatter(_epoch_formatter))
+
+            # 根据时间跨度选择合理的刻度
+            span_sec = x_max - x_min
+            if span_sec <= 60:
+                # 1分钟以内：按 5-10 个刻度
+                step = max(1, int(span_sec / 6))
+                if step < 1:
+                    step = 1
+                self.ax.xaxis.set_major_locator(
+                    mdates.SecondLocator(bysecond=range(0, 60, max(1, step)))
+                )
+                # 手动设置更简单的刻度，避免 DateLocator 对 epoch 不兼容
+                from matplotlib.ticker import FixedLocator, MaxNLocator
+                self.ax.xaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 5, 10]))
+            elif span_sec <= 3600:
+                from matplotlib.ticker import MaxNLocator
+                self.ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+            else:
+                from matplotlib.ticker import MaxNLocator
+                self.ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+
+            # X 轴标签旋转避免重叠
+            for label in self.ax.get_xticklabels():
+                label.set_rotation(15)
+                label.set_ha('right')
+        except Exception:
+            # 格式化失败不影响图表显示
+            pass
     
     def bind_scroll(self, callback):
         """

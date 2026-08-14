@@ -4,13 +4,14 @@ CSV数据加载器单元测试
 验证优化后的功能正确性和性能提升
 """
 
-import pytest
-import tempfile
 import os
 import time
 import tracemalloc
 from typing import Generator
 
+import pytest
+
+from conftest import write_temp_text_file
 from core.csv_loader import CSVDataLoader, MULTI_SELECT_COLUMNS
 
 
@@ -20,13 +21,10 @@ def sample_csv_utf8() -> Generator[str, None, None]:
     content = "Time[s],PackSOC[%],MaxCellTemp[°C],Status\n"
     for i in range(100):
         content += f"{i*0.1},{80-i*0.1},{25+i*0.05},OK\n"
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', 
-                                     encoding='utf-8-sig', delete=False) as f:
-        f.write(content)
-        yield f.name
-    
-    os.unlink(f.name)
+
+    path = write_temp_text_file(content, encoding="utf-8-sig")
+    yield path
+    os.unlink(path)
 
 
 @pytest.fixture
@@ -35,13 +33,10 @@ def sample_csv_gbk() -> Generator[str, None, None]:
     content = "时间[s],电池SOC[%],最高温度[°C],状态\n"
     for i in range(100):
         content += f"{i*0.1},{80-i*0.1},{25+i*0.05},正常\n"
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', 
-                                     encoding='gbk', delete=False) as f:
-        f.write(content)
-        yield f.name
-    
-    os.unlink(f.name)
+
+    path = write_temp_text_file(content, encoding="gbk")
+    yield path
+    os.unlink(path)
 
 
 @pytest.fixture
@@ -50,13 +45,10 @@ def large_csv_file() -> Generator[str, None, None]:
     content = "Time[s],Value1,Value2,Value3,Value4,Value5\n"
     for i in range(10000):
         content += f"{i*0.01},{i*1.5},{i*2.5},{i*3.5},{i*4.5},{i*5.5}\n"
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', 
-                                     encoding='utf-8', delete=False) as f:
-        f.write(content)
-        yield f.name
-    
-    os.unlink(f.name)
+
+    path = write_temp_text_file(content, encoding="utf-8")
+    yield path
+    os.unlink(path)
 
 
 @pytest.fixture
@@ -70,12 +62,9 @@ def csv_with_special_values() -> Generator[str, None, None]:
 0.4,-10,negative
 0.5,0,zero
 """
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', 
-                                     encoding='utf-8', delete=False) as f:
-        f.write(content)
-        yield f.name
-    
-    os.unlink(f.name)
+    path = write_temp_text_file(content, encoding="utf-8")
+    yield path
+    os.unlink(path)
 
 
 class TestCSVDataLoaderBasic:
@@ -218,7 +207,7 @@ class TestCSVDataLoaderStatistics:
         
         assert stats['type'] == 'numeric'
         assert stats['count'] == 100
-        assert stats['min'] == pytest.approx(70.0, rel=1e-6)
+        assert stats['min'] == pytest.approx(70.1, rel=1e-6)
         assert stats['max'] == pytest.approx(80.0, rel=1e-6)
         assert 'mean' in stats
     
@@ -356,47 +345,31 @@ class TestCSVDataLoaderEdgeCases:
     
     def test_empty_file(self):
         """测试空文件"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', 
-                                         encoding='utf-8', delete=False) as f:
-            f.write("")
-            empty_path = f.name
-        
+        empty_path = write_temp_text_file("", encoding="utf-8")
         loader = CSVDataLoader()
         result = loader.load(empty_path)
-        
         os.unlink(empty_path)
-        assert result == False
-    
+        assert result is False
+
     def test_header_only(self):
         """测试只有表头的文件"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', 
-                                         encoding='utf-8', delete=False) as f:
-            f.write("col1,col2,col3\n")
-            header_path = f.name
-        
+        header_path = write_temp_text_file("col1,col2,col3\n", encoding="utf-8")
         loader = CSVDataLoader()
         result = loader.load(header_path)
-        
         os.unlink(header_path)
-        assert result == True
+        assert result is True
         assert loader.row_count == 0
         assert len(loader.columns) == 3
-    
+
     def test_irregular_rows(self):
         """测试不规则行"""
         content = "col1,col2,col3\n1,2,3\n4,5\n6,7,8,9\n10,11,12\n"
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', 
-                                         encoding='utf-8', delete=False) as f:
-            f.write(content)
-            irregular_path = f.name
-        
+        irregular_path = write_temp_text_file(content, encoding="utf-8")
         loader = CSVDataLoader()
         result = loader.load(irregular_path)
-        
         os.unlink(irregular_path)
-        assert result == True
-        assert loader.row_count == 1
+        assert result is True
+        assert loader.row_count == 2
 
 
 if __name__ == '__main__':

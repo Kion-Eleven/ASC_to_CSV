@@ -236,7 +236,8 @@ class SingleFileProcessor:
         self.csv_writer = EnhancedCSVWriter(
             output_dir=self.config.output_dir,
             encoding=self.config.csv_encoding,
-            overwrite=overwrite
+            overwrite=overwrite,
+            start_time=self.asc_parser.start_time if self.asc_parser else 0.0
         )
 
         write_result = self.csv_writer.write_all_groups(

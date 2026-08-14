@@ -4,12 +4,14 @@
 验证ExportTab的列选择和数据导出功能
 """
 
-import pytest
-import tempfile
-import os
 import csv
+import os
+import tempfile
 from typing import Generator
 
+import pytest
+
+from conftest import write_temp_text_file
 from core.csv_loader import CSVDataLoader
 
 
@@ -20,12 +22,9 @@ def sample_csv_file() -> Generator[str, None, None]:
     for i in range(100):
         content += f"{i*0.1},{80-i*0.1},{25+i*0.05},{20-i*0.05},OK\n"
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
-                                     encoding='utf-8-sig', delete=False) as f:
-        f.write(content)
-        yield f.name
-
-    os.unlink(f.name)
+    path = write_temp_text_file(content, encoding="utf-8-sig")
+    yield path
+    os.unlink(path)
 
 
 @pytest.fixture
@@ -37,12 +36,9 @@ def sample_csv_with_spaces() -> Generator[str, None, None]:
     content += "0.2,1.5,,3.5\n"
     content += "0.3,1.5,2.5,3.5\n"
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
-                                     encoding='utf-8', delete=False) as f:
-        f.write(content)
-        yield f.name
-
-    os.unlink(f.name)
+    path = write_temp_text_file(content, encoding="utf-8")
+    yield path
+    os.unlink(path)
 
 
 def export_columns_to_csv(file_path: str, loader: CSVDataLoader,
@@ -257,7 +253,7 @@ class TestDataExportEncoding:
         loader = CSVDataLoader()
         loader.load(sample_csv_file)
 
-        selected_columns = ["Time[s]", "PackSOC[%"]
+        selected_columns = ["Time[s]", "PackSOC[%]"]
 
         temp_output = tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
                                                   delete=False, encoding='utf-8-sig')
@@ -269,7 +265,7 @@ class TestDataExportEncoding:
             assert success is True
 
             headers, rows = read_csv_content(temp_output.name, 'utf-8-sig')
-            assert headers == ["Time[s]", "PackSOC[%"]
+            assert headers == ["Time[s]", "PackSOC[%]"]
         finally:
             os.unlink(temp_output.name)
 

@@ -72,6 +72,15 @@ class VisualizeTab(BaseTab):
 
         super().__init__(parent, app_context)
     
+    def on_activate(self):
+        """标签页激活：确保图表可见并重绘"""
+        super().on_activate()
+        if self.chart_manager is not None:
+            try:
+                self.chart_manager.draw_idle()
+            except Exception:
+                pass
+    
     def _create_widgets(self):
         """创建界面组件"""
         control_frame = ttk.LabelFrame(self, text="控制面板", padding="10")

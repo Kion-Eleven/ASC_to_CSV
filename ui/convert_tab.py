@@ -571,9 +571,12 @@ class ConvertTab(BaseTab, LogMixin):
                 self.app_context['root'].after(0,
                     lambda: self._update_progress_display(progress, line_count))
 
+            def log_callback(message: str):
+                self.app_context['root'].after(0, lambda m=message: self._log(m))
+
             result = service.convert(
                 progress_callback=progress_callback,
-                log_callback=self._log
+                log_callback=log_callback
             )
 
             if result.success:
@@ -593,9 +596,10 @@ class ConvertTab(BaseTab, LogMixin):
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
-            self._log(f"转换失败: {error_msg}")
+            self.app_context['root'].after(0, lambda: self._log(f"转换失败: {error_msg}"))
             if self.debug_var.get():
-                self._log(traceback.format_exc())
+                self.app_context['root'].after(0,
+                    lambda: self._log(traceback.format_exc()))
             self.app_context['root'].after(0,
                 lambda: messagebox.showerror("错误", f"转换失败: {error_msg}"))
 

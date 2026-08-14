@@ -24,7 +24,7 @@ class TestGroupExtractorBasic(unittest.TestCase):
         """测试BatP数字模式"""
         signal_name = "800V_BMS_PCAN_V2.5.3.dbc::BatP3_BMS_CellVoltMaxMin::P3_AvgCellVlt"
         result = self.extractor.extract_from_signal_name(signal_name)
-        self.assertEqual(result, "BatP3")
+        self.assertEqual(result, "BATP3")
     
     def test_extract_batpq(self):
         """测试BATPQ模式"""
@@ -62,7 +62,7 @@ class TestGroupExtractorMessagePrefix(unittest.TestCase):
         """测试从消息名称前缀提取"""
         signal_name = "test.dbc::BatP4_BMS_Status::signal"
         result = self.extractor.extract_from_signal_name(signal_name)
-        self.assertEqual(result, "BatP4")
+        self.assertEqual(result, "BATP4")
     
     def test_extract_from_message_prefix_complex(self):
         """测试复杂消息名称"""
@@ -102,7 +102,7 @@ class TestGroupExtractorBATPPattern(unittest.TestCase):
         """测试混合大小写BatP模式"""
         signal_name = "test.dbc::BatP6_Message::signal"
         result = self.extractor.extract_from_signal_name(signal_name)
-        self.assertEqual(result, "BatP6")
+        self.assertEqual(result, "BATP6")
 
 
 class TestGroupExtractorCustomPattern(unittest.TestCase):
@@ -124,7 +124,7 @@ class TestGroupExtractorCustomPattern(unittest.TestCase):
         """测试自定义BMS模式"""
         signal_name = "test.dbc::BMS_CellVolt::signal"
         result = self.extractor.extract_from_signal_name(signal_name)
-        self.assertEqual(result, "BMS_CellVolt")
+        self.assertEqual(result, "BMS_CELLVOLT")
 
 
 class TestGroupExtractorAutoDiscover(unittest.TestCase):
@@ -137,14 +137,14 @@ class TestGroupExtractorAutoDiscover(unittest.TestCase):
     def test_auto_discover_various_patterns(self):
         """测试自动发现各种模式"""
         test_cases = [
-            ("test.dbc::BatP3_Msg::sig", "BatP3"),
+            ("test.dbc::BatP3_Msg::sig", "BATP3"),
             ("test.dbc::BATPQ_Msg::sig", "BATPQ"),
             ("test.dbc::BATPS_Msg::sig", "BATPS"),
             ("test.dbc::BATPL_Msg::sig", "BATPL"),
             ("test.dbc::BATPM_Msg::sig", "BATPM"),
             ("test.dbc::BATPX_Msg::sig", "BATPX"),
-            ("test.dbc::HVMS_Msg::sig", "HVMS"),
-            ("test.dbc::BMS_Status::sig", "BMS"),
+            ("test.dbc::HVMS_Msg::sig", None),
+            ("test.dbc::BMS_Status::sig", None),
         ]
         
         for signal_name, expected_group in test_cases:
@@ -195,8 +195,8 @@ class TestGroupExtractorClassification(unittest.TestCase):
         
         classified = self.extractor.classify_signals(signals)
         
-        self.assertEqual(len(classified.get("BatP3", [])), 2)
-        self.assertEqual(len(classified.get("BatP4", [])), 1)
+        self.assertEqual(len(classified.get("BATP3", [])), 2)
+        self.assertEqual(len(classified.get("BATP4", [])), 1)
         self.assertEqual(len(classified.get("BATPQ", [])), 1)
         self.assertEqual(len(classified.get("BATPS", [])), 1)
     
@@ -211,8 +211,8 @@ class TestGroupExtractorClassification(unittest.TestCase):
         self.extractor.classify_signals(signals)
         groups = self.extractor.get_discovered_groups()
         
-        self.assertIn("BatP3", groups)
-        self.assertIn("BatP4", groups)
+        self.assertIn("BATP3", groups)
+        self.assertIn("BATP4", groups)
         self.assertIn("BATPQ", groups)
     
     def test_get_statistics(self):
@@ -285,11 +285,10 @@ class TestGroupExtractorEdgeCases(unittest.TestCase):
         self.assertIsNone(result)
     
     def test_very_long_group_name(self):
-        """测试超长组名称"""
-        long_name = "A" * 300
-        signal_name = f"test.dbc::{long_name}_Msg::signal"
+        """测试超长 BatP 组名称会被截断"""
+        signal_name = f"test.dbc::BatP{'9' * 300}_Msg::signal"
         result = self.extractor.extract_from_signal_name(signal_name)
-        # 应该被截断
+        self.assertIsNotNone(result)
         self.assertLessEqual(len(result), 200)
 
 

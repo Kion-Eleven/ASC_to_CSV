@@ -162,7 +162,6 @@ class MainApplication:
         if 0 <= self._current_tab_index < len(self._tabs):
             old_tab = self._tabs[self._current_tab_index]
             old_tab.on_deactivate()
-            old_tab.cleanup()
 
         self._current_tab_index = new_index
 

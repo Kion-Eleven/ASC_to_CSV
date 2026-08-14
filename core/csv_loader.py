@@ -11,6 +11,7 @@ CSV数据加载器模块
 
 import csv
 import re
+from datetime import datetime
 from typing import Dict, List, Optional, Iterator, Tuple
 
 
@@ -37,6 +38,9 @@ class CSVDataLoader:
     SUPPORTED_ENCODINGS = ['utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'latin-1']
     
     _NUMERIC_PATTERN = re.compile(r'^-?\d+\.?\d*(?:[eE][+-]?\d+)?$')
+    _DATETIME_PATTERN = re.compile(
+        r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$'
+    )
     
     def __init__(self):
         """初始化数据加载器"""
@@ -132,6 +136,7 @@ class CSVDataLoader:
                     self.row_count += 1
 
                 self.total_rows = self.row_count
+            self._normalize_time_column()
             return True
         except IOError as e:
             print(f"文件读写错误: {e}")
@@ -188,12 +193,14 @@ class CSVDataLoader:
             if start == 0:
                 self._count_total_rows()
         
+        self._normalize_time_column()
         return loaded > 0
     
     def _count_total_rows(self):
         """计算文件总行数"""
+        encoding = self._encoding or 'utf-8-sig'
         try:
-            with open(self._file_path, 'r', newline='', encoding=self._encoding) as f:
+            with open(self._file_path, 'r', newline='', encoding=encoding) as f:
                 self.total_rows = sum(1 for _ in f) - 1
         except Exception:
             self.total_rows = self.row_count
@@ -237,6 +244,66 @@ class CSVDataLoader:
                 return stripped
         
         return stripped
+    
+    def _parse_datetime_to_epoch(self, value: str) -> Optional[float]:
+        """
+        将日期时间字符串转换为 epoch 秒数（浮点数）
+        
+        支持格式: YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD HH:MM:SS.x
+        
+        Args:
+            value: 日期时间字符串
+            
+        Returns:
+            Optional[float]: epoch 秒数，转换失败返回 None
+        """
+        if not value or not value.strip():
+            return None
+        s = value.strip()
+        if not self._DATETIME_PATTERN.match(s):
+            return None
+        try:
+            if '.' in s:
+                dt = datetime.strptime(s, '%Y-%m-%d %H:%M:%S.%f')
+            else:
+                dt = datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+            return dt.timestamp()
+        except ValueError:
+            return None
+    
+    def _normalize_time_column(self):
+        """
+        归一化时间列：若时间列为日期时间字符串格式，将其转换为数值型 epoch 秒数，
+        以便图表、筛选等功能正常工作。
+        """
+        time_col = self.get_time_column()
+        if not time_col or time_col not in self.data:
+            return
+        values = self.data[time_col]
+        if not values:
+            return
+        # 如果已经全部是数值类型，无需转换
+        sample = [v for v in values[:5] if v is not None]
+        if sample and all(isinstance(v, (int, float)) for v in sample):
+            return
+        # 尝试日期时间转换
+        converted = []
+        all_ok = True
+        for v in values:
+            if v is None:
+                converted.append(None)
+                continue
+            if isinstance(v, (int, float)):
+                converted.append(float(v))
+                continue
+            s = str(v)
+            epoch = self._parse_datetime_to_epoch(s)
+            if epoch is None:
+                all_ok = False
+                break
+            converted.append(epoch)
+        if all_ok:
+            self.data[time_col] = converted
     
     def load_more(self) -> bool:
         """
