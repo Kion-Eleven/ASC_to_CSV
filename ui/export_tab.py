@@ -11,6 +11,7 @@ import csv
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, List
+from datetime import datetime
 
 from .base import BaseTab, LogMixin
 from core.csv_loader import CSVDataLoader
@@ -34,6 +35,8 @@ class ExportTab(BaseTab, LogMixin):
         """
         # 创建CSV数据加载器实例，用于加载和解析CSV文件
         self.data_loader = CSVDataLoader()
+        # 当前加载文件对应的时间列名（被归一化为 epoch 的列，导出时需要还原为字符串）
+        self._time_column: Optional[str] = None
         # 当前加载的CSV文件路径
         self.current_file: Optional[str] = None
         # 可用的数据列名列表（从CSV文件中读取）
@@ -460,6 +463,37 @@ class ExportTab(BaseTab, LogMixin):
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+    def _format_cell_value(self, col: str, value) -> str:
+        """
+        格式化单元格值用于预览或导出。
+
+        若该列为被归一化过的时间列（值为 epoch 秒浮点），则还原为
+        用户可阅读的 `yyyy/mm/dd h:mm:ss.f` 字符串格式，防止导出后
+        显示为 1786959657 这种大整数。
+        """
+        if value is None:
+            return ""
+        if (
+            self._time_column
+            and col == self._time_column
+            and isinstance(value, (int, float))
+            and value > 1e9  # epoch 2001 年之后，确认为真实时间戳
+        ):
+            try:
+                whole = int(value)
+                frac = round((value - whole) * 10)
+                if frac == 10:
+                    whole += 1
+                    frac = 0
+                frac %= 10
+                dt = datetime.fromtimestamp(whole)
+                date_part = f"{dt.year:04d}/{dt.month:02d}/{dt.day:02d}"
+                time_part = f"{dt.hour}:{dt.minute:02d}:{dt.second:02d}"
+                return f"{date_part} {time_part}.{frac}"
+            except (OSError, OverflowError, ValueError):
+                return str(value)
+        return str(value)
+
     def _browse_file(self):
         """浏览并选择CSV文件"""
         filename = filedialog.askopenfilename(
@@ -485,6 +519,8 @@ class ExportTab(BaseTab, LogMixin):
         self._log(f"正在加载: {os.path.basename(file_path)}")
 
         if self.data_loader.load(file_path):
+            # 缓存时间列名（导出/预览时按名格式化）
+            self._time_column = self.data_loader.get_time_column()
             self.current_file = file_path
             self.available_columns = self.data_loader.columns
             self.selected_columns = []
@@ -686,7 +722,7 @@ class ExportTab(BaseTab, LogMixin):
             row_data = []
             for col in preview_cols:
                 value = self.data_loader.data[col][row_idx]
-                row_data.append(str(value) if value is not None else "")
+                row_data.append(self._format_cell_value(col, value))
             self.preview_tree.insert("", tk.END, values=row_data)
 
     def _browse_path(self):
@@ -759,7 +795,12 @@ class ExportTab(BaseTab, LogMixin):
                     row_data = []
                     for col in self.selected_columns:
                         value = self.data_loader.data[col][row_idx]
-                        row_data.append(value if value is not None else "")
+                        # 空值保持空串（兼容 Excel），非空值用格式化方法：
+                        # 若是时间列将 epoch 浮点数还原为 yyyy/mm/dd h:mm:ss.f 字符串
+                        if value is None or value == "":
+                            row_data.append("")
+                        else:
+                            row_data.append(self._format_cell_value(col, value))
                     writer.writerow(row_data)
         except Exception as e:
             raise RuntimeError(f"写入文件失败: {e}")
@@ -767,6 +808,7 @@ class ExportTab(BaseTab, LogMixin):
     def _clear_all(self):
         """清空所有选项，重置到初始状态"""
         self.data_loader.clear()
+        self._time_column = None
         self.current_file = None
         self.available_columns = []
         self.selected_columns = []

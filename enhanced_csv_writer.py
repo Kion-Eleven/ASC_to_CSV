@@ -589,9 +589,18 @@ class EnhancedCSVWriter:
             total = timestamp + self.start_time
             whole = int(total)
             frac = round((total - whole) * 10)
+            if frac == 10:
+                # 向上进位 1 秒
+                whole += 1
+                frac = 0
+            frac %= 10
             dt = datetime.fromtimestamp(whole)
-            time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
-            row = [f"{time_str}.{frac}"]
+            # 格式: yyyy/mm/dd h:mm:ss.f
+            #   - 年 4 位、月/日 2 位补零、小时不补零（1~2 位）
+            #   - 分/秒 2 位补零、1 位小数
+            date_part = f"{dt.year:04d}/{dt.month:02d}/{dt.day:02d}"
+            time_part = f"{dt.hour}:{dt.minute:02d}:{dt.second:02d}"
+            row = [f"{date_part} {time_part}.{frac}"]
         else:
             row = [round(timestamp, 1)]
         for sig_name in signals:

@@ -39,7 +39,7 @@ class CSVDataLoader:
     
     _NUMERIC_PATTERN = re.compile(r'^-?\d+\.?\d*(?:[eE][+-]?\d+)?$')
     _DATETIME_PATTERN = re.compile(
-        r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$'
+        r'^\d{4}[-/]\d{2}[-/]\d{2} \d{1,2}:\d{2}:\d{2}(?:\.\d+)?$'
     )
     
     def __init__(self):
@@ -249,7 +249,10 @@ class CSVDataLoader:
         """
         将日期时间字符串转换为 epoch 秒数（浮点数）
         
-        支持格式: YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD HH:MM:SS.x
+        支持格式（兼容多种分隔符和小时位数）:
+            - YYYY-MM-DD HH:MM:SS[.f]
+            - YYYY/MM/DD H:MM:SS[.f]   （1 位或 2 位小时）
+            - 以及上述分隔符的任意组合
         
         Args:
             value: 日期时间字符串
@@ -263,12 +266,25 @@ class CSVDataLoader:
         if not self._DATETIME_PATTERN.match(s):
             return None
         try:
+            # 拆分日期 / 时间 / 小数秒
             if '.' in s:
-                dt = datetime.strptime(s, '%Y-%m-%d %H:%M:%S.%f')
+                main_str, frac_str = s.rsplit('.', 1)
+                # 小数部分转成 float 秒（只取第一位，多余位截断）
+                frac_val = float('0.' + frac_str) if frac_str else 0.0
             else:
-                dt = datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
-            return dt.timestamp()
-        except ValueError:
+                main_str = s
+                frac_val = 0.0
+            
+            date_str, time_str = main_str.split()
+            # 拆分日期（兼容 - 和 /）
+            date_parts = re.split(r'[-/]', date_str)
+            y, mo, d = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
+            # 拆分时间
+            hh, mm, ss = (int(p) for p in time_str.split(':'))
+            
+            dt = datetime(y, mo, d, hh, mm, ss)
+            return dt.timestamp() + frac_val
+        except (ValueError, IndexError):
             return None
     
     def _normalize_time_column(self):
