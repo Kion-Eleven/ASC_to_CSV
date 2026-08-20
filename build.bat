@@ -59,7 +59,7 @@ echo ========================================
 echo   Build Complete!
 echo ========================================
 echo.
-echo Output: dist\ASCtoCSV.exe
+echo Output: dist\ASCtoCSV\ASCtoCSV.exe  (onedir mode, faster startup)
 echo.
 
 if exist "resource\icon.ico" (
@@ -70,8 +70,8 @@ if exist "resource\icon.ico" (
 echo.
 
 echo Usage:
-echo   1. Copy dist\ASCtoCSV.exe to any folder
-echo   2. Double-click to run
+echo   1. Copy the entire dist\ASCtoCSV\ folder to any location
+echo   2. Double-click ASCtoCSV.exe inside that folder to run
 echo   3. Use "Data Convert" tab to convert ASC to CSV
 echo   4. Use "Data Visualize" tab to view charts
 echo.

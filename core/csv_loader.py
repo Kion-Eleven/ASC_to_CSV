@@ -21,6 +21,22 @@ MULTI_SELECT_COLUMNS = [
     'PackFltCode', 'PackTotCrnt'
 ]
 
+# 方案7优化：缓存本地时区偏移，用纯算术替代 timestamp() 的系统调用。
+# 注意：不能用 datetime(1970,1,1).timestamp()（Windows 上本地时间早于
+# 1970-01-01 会抛 OSError），改用远期参考点推算偏移。
+_LOCAL_EPOCH_OFFSET: Optional[float] = None
+_EPOCH_BASE = datetime(1970, 1, 1)
+_EPOCH_REF = datetime(2020, 1, 1)
+
+
+def _get_local_epoch_offset() -> float:
+    """获取本地时区相对 UTC 的 epoch 偏移（缓存，仅计算一次）"""
+    global _LOCAL_EPOCH_OFFSET
+    if _LOCAL_EPOCH_OFFSET is None:
+        _LOCAL_EPOCH_OFFSET = (_EPOCH_REF.timestamp()
+                               - (_EPOCH_REF - _EPOCH_BASE).total_seconds())
+    return _LOCAL_EPOCH_OFFSET
+
 
 class CSVDataLoader:
     """
@@ -107,7 +123,13 @@ class CSVDataLoader:
     
     def _load_with_encoding(self, file_path: str, encoding: str) -> bool:
         """
-        使用指定编码加载文件
+        使用指定编码加载文件（方案7优化：列式批量解析）
+
+        原实现逐行逐格调用类型推断函数（每格一次函数调用+正则匹配），
+        大文件时产生千万次 Python 层调用。现改为：
+        1. 先把全部行读成字符串（csv.reader 的 C 级解析）
+        2. 再按列批量转换：数值列用 map(float) 批量转换，
+           类型不符时自动退回逐值推断，保证行为一致
 
         Args:
             file_path: 文件路径
@@ -128,19 +150,82 @@ class CSVDataLoader:
                 for col in self.columns:
                     self.data[col] = []
 
-                for row in reader:
-                    if len(row) != len(self.columns):
-                        self._skipped_rows += 1
-                        continue
-                    self._parse_row(row)
-                    self.row_count += 1
+                # 一次性读取全部数据行（字符串形式）
+                all_rows = list(reader)
 
-                self.total_rows = self.row_count
+            if not all_rows:
+                self.row_count = 0
+                self.total_rows = 0
+                self._normalize_time_column()
+                return True
+
+            n_cols = len(self.columns)
+            # 过滤列数不符的行
+            valid_rows = []
+            skipped = 0
+            for row in all_rows:
+                if len(row) == n_cols:
+                    valid_rows.append(row)
+                else:
+                    skipped += 1
+            self._skipped_rows = skipped
+
+            row_count = len(valid_rows)
+            self.row_count = row_count
+            self.total_rows = row_count
+
+            # 按列批量转换（列式处理，比逐格推断快数倍）
+            for col_idx, col_name in enumerate(self.columns):
+                raw_col = [row[col_idx] for row in valid_rows]
+                self.data[col_name] = self._convert_column(raw_col)
+
             self._normalize_time_column()
             return True
         except IOError as e:
             print(f"文件读写错误: {e}")
             return False
+
+    def _convert_column(self, raw_col: List[str]) -> List:
+        """
+        批量转换一列字符串数据（方案7优化）
+
+        通过 try/except 分层处理，避免逐值做正则预检：
+        - 快路径1：全列直接 float() 转换（无空值/无空格时命中）
+        - 快路径2：strip + 占位转换（数值列含空值时命中，空值还原为 None）
+        - 慢路径：混有非数值时退回逐值推断（与原 _infer_value_type 行为一致）
+
+        Args:
+            raw_col: 该列的原始字符串列表
+
+        Returns:
+            List: 转换后的数据列表（数值/None/字符串）
+        """
+        # 快路径1：直接批量转换
+        try:
+            return list(map(float, raw_col))
+        except (ValueError, TypeError):
+            pass
+
+        # 快路径2：处理空值/空格后批量转换
+        cleaned = []
+        empty_idx = []
+        for i, v in enumerate(raw_col):
+            s = v.strip() if v else ''
+            if s:
+                cleaned.append(s)
+            else:
+                cleaned.append('0')  # 占位，转换后还原为 None
+                empty_idx.append(i)
+        try:
+            converted = list(map(float, cleaned))
+            for i in empty_idx:
+                converted[i] = None
+            return converted
+        except (ValueError, TypeError):
+            pass
+
+        # 慢路径：混有非数值内容，逐值推断（保持与原逻辑一致）
+        return [self._infer_value_type(v) for v in raw_col]
     
     def _load_chunk(self, start: int, count: int) -> bool:
         """
@@ -282,8 +367,11 @@ class CSVDataLoader:
             # 拆分时间
             hh, mm, ss = (int(p) for p in time_str.split(':'))
             
+            # 方案7优化：缓存本地时区偏移，用纯算术替代 timestamp() 的
+            # 系统时区转换（Windows 上每次调用开销较大）
             dt = datetime(y, mo, d, hh, mm, ss)
-            return dt.timestamp() + frac_val
+            epoch = (dt - _EPOCH_BASE).total_seconds() + _get_local_epoch_offset()
+            return epoch + frac_val
         except (ValueError, IndexError):
             return None
     

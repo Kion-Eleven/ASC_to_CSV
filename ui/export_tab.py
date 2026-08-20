@@ -8,6 +8,7 @@
 
 import os
 import csv
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, List
@@ -78,6 +79,11 @@ class ExportTab(BaseTab, LogMixin):
         self.left_selections: List[int] = []
         # 右侧列表框的选中项索引列表
         self.right_selections: List[int] = []
+
+        # 异步加载相关字段（方案六优化）
+        self._load_thread: Optional[threading.Thread] = None
+        self._load_cancel_event: threading.Event = threading.Event()
+        self._loading_file: Optional[str] = None
 
         # 调用父类初始化方法，完成基类的初始化
         super().__init__(parent, app_context)
@@ -506,7 +512,11 @@ class ExportTab(BaseTab, LogMixin):
             self._load_selected_file()
 
     def _load_selected_file(self):
-        """加载选中的CSV文件"""
+        """加载选中的CSV文件 - 异步版本（后台线程执行，不阻塞UI）
+
+        方案六优化：将耗时的CSV解析放到后台线程，主线程保持响应。
+        后台线程只做纯数据IO和计算，所有Tk控件更新通过主线程回调执行。
+        """
         file_path = self.file_entry.get().strip()
         if not file_path:
             messagebox.showwarning("提示", "请输入或选择CSV文件路径")
@@ -516,37 +526,85 @@ class ExportTab(BaseTab, LogMixin):
             messagebox.showerror("错误", f"文件不存在: {file_path}")
             return
 
+        # 取消上一次正在进行的加载任务
+        if self._load_thread and self._load_thread.is_alive():
+            self._load_cancel_event.set()
+            self._load_thread.join(timeout=0.5)
+        self._load_cancel_event.clear()
+        self._loading_file = file_path
+
         self._log(f"正在加载: {os.path.basename(file_path)}")
 
-        if self.data_loader.load(file_path):
-            # 缓存时间列名（导出/预览时按名格式化）
-            self._time_column = self.data_loader.get_time_column()
-            self.current_file = file_path
-            self.available_columns = self.data_loader.columns
-            self.selected_columns = []
-            self.filtered_columns = self.available_columns[:]
-            self.search_keyword = ""
+        def load_worker():
+            """后台线程：只做纯数据加载，不触碰任何Tk控件"""
+            try:
+                loader = CSVDataLoader()
+                success = loader.load(file_path)
+                if not self._load_cancel_event.is_set():
+                    self.app_context['root'].after(
+                        0, lambda: self._on_load_complete(success, loader, file_path)
+                    )
+            except Exception as e:
+                if not self._load_cancel_event.is_set():
+                    err_msg = str(e)
+                    self.app_context['root'].after(
+                        0, lambda: self._on_load_error(err_msg, file_path)
+                    )
 
-            if self.search_entry:
-                self.search_entry.delete(0, tk.END)
+        self._load_thread = threading.Thread(target=load_worker, daemon=True)
+        self._load_thread.start()
 
-            self._update_left_listbox()
+    def _on_load_complete(self, success: bool, loader: CSVDataLoader, file_path: str):
+        """CSV加载完成回调（主线程执行）
 
-            self.right_listbox.delete(0, tk.END)
+        所有UI控件操作都在这里执行，确保线程安全。
+        """
+        # 如果当前加载的文件已经不是用户最后选择的文件，忽略旧结果
+        if file_path != self._loading_file:
+            return
 
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            self.filename_entry.delete(0, tk.END)
-            self.filename_entry.insert(0, base_name)
-
-            default_path = self.app_context.get('output_dir', os.path.dirname(file_path))
-            self.path_entry.delete(0, tk.END)
-            self.path_entry.insert(0, default_path)
-
-            self._update_status()
-            self._log(f"已加载 {len(self.available_columns)} 列，共 {self.data_loader.row_count} 行数据")
-        else:
+        if not success:
             self._log("加载失败，请检查文件格式和编码")
             messagebox.showerror("错误", "文件加载失败")
+            return
+
+        # 释放旧 data_loader 内存
+        if self.data_loader:
+            self.data_loader.clear()
+        self.data_loader = loader
+
+        # 缓存时间列名（导出/预览时按名格式化）
+        self._time_column = self.data_loader.get_time_column()
+        self.current_file = file_path
+        self.available_columns = self.data_loader.columns
+        self.selected_columns = []
+        self.filtered_columns = self.available_columns[:]
+        self.search_keyword = ""
+
+        if self.search_entry:
+            self.search_entry.delete(0, tk.END)
+
+        self._update_left_listbox()
+
+        self.right_listbox.delete(0, tk.END)
+
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        self.filename_entry.delete(0, tk.END)
+        self.filename_entry.insert(0, base_name)
+
+        default_path = self.app_context.get('output_dir', os.path.dirname(file_path))
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, default_path)
+
+        self._update_status()
+        self._log(f"已加载 {len(self.available_columns)} 列，共 {self.data_loader.row_count} 行数据")
+
+    def _on_load_error(self, error_msg: str, file_path: str):
+        """CSV加载错误回调（主线程执行）"""
+        if file_path != self._loading_file:
+            return
+        self._log(f"加载失败: {error_msg[:100]}")
+        messagebox.showerror("错误", f"文件加载失败:\n{error_msg[:200]}")
 
     def _on_search_changed(self, event=None):
         """搜索框内容变化时的处理"""
@@ -835,6 +893,22 @@ class ExportTab(BaseTab, LogMixin):
     def refresh_files(self):
         """刷新文件列表（供外部调用）"""
         pass
+
+    def cleanup(self):
+        """清理资源，防止内存泄漏（方案六新增）"""
+        # 先取消后台加载线程
+        self._load_cancel_event.set()
+        if self._load_thread and self._load_thread.is_alive():
+            self._load_thread.join(timeout=1.0)
+        self._load_thread = None
+
+        if self.data_loader:
+            self.data_loader.clear()
+
+        self.current_file = None
+        self.available_columns = []
+        self.selected_columns = []
+        self.filtered_columns = []
 
     def _log(self, message: str):
         """输出日志"""

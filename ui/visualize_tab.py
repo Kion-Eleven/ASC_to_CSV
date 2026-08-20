@@ -6,6 +6,7 @@
 
 import os
 import time
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional, List, Dict, Any
@@ -57,6 +58,15 @@ class VisualizeTab(BaseTab):
 
         self._max_data_points: int = 100000
         self._data_warning_shown: bool = False
+
+        # 异步加载相关字段（方案六优化）
+        self._load_thread: Optional[threading.Thread] = None
+        self._load_cancel_event: threading.Event = threading.Event()
+        self._loading_file: Optional[str] = None
+
+        # 方案4优化：跟踪当前图表上下文（文件+列），
+        # 仅在上下文变化时才重建 labels/legend/grid，zoom/scroll 只更新数据
+        self._last_chart_context: Optional[tuple] = None
 
         self.file_combo: Optional[ttk.Combobox] = None
         self.column_combo: Optional[ttk.Combobox] = None
@@ -183,44 +193,110 @@ class VisualizeTab(BaseTab):
         self._load_csv_file(file_path)
     
     def _load_csv_file(self, file_path: str):
-        """加载CSV文件"""
+        """加载CSV文件 - 异步版本（后台线程执行，不阻塞UI）
+
+        方案六优化：将耗时的CSV解析放到后台线程，主线程保持响应。
+        注意：所有 Tk/matplotlib GUI 操作必须在主线程执行，
+        后台线程只做纯数据IO和计算（CSVDataLoader.load()）。
+        """
+        # 取消上一次正在进行的加载任务
+        if self._load_thread and self._load_thread.is_alive():
+            self._load_cancel_event.set()
+            self._load_thread.join(timeout=0.5)
+        self._load_cancel_event.clear()
+        self._loading_file = file_path
+
+        # 立即在主线程更新状态提示（非阻塞）
         self.status_label.config(text=f"正在加载: {os.path.basename(file_path)}...")
-        self.app_context['root'].update()
+        # 注意：不再调用 root.update()，它会强制重入事件循环导致卡顿
 
-        if self.data_loader.load(file_path):
-            self.current_file = file_path
+        def load_worker():
+            """后台线程：只做纯数据加载，不触碰任何Tk/matplotlib控件"""
+            try:
+                loader = CSVDataLoader()
+                success = loader.load(file_path)
+                # 加载完成后通过 root.after 回到主线程更新UI
+                if not self._load_cancel_event.is_set():
+                    self.app_context['root'].after(
+                        0, lambda: self._on_load_complete(success, loader, file_path)
+                    )
+            except Exception as e:
+                if not self._load_cancel_event.is_set():
+                    err_msg = str(e)
+                    self.app_context['root'].after(
+                        0, lambda: self._on_load_error(err_msg, file_path)
+                    )
 
-            numeric_cols = self.data_loader.get_numeric_columns()
-            self._all_columns = numeric_cols
+        self._load_thread = threading.Thread(target=load_worker, daemon=True)
+        self._load_thread.start()
 
-            self.column_combo['values'] = numeric_cols
-            if numeric_cols:
-                self.column_combo.set(numeric_cols[0])
-                self.current_column = numeric_cols[0]
+    def _on_load_complete(self, success: bool, loader: CSVDataLoader, file_path: str):
+        """CSV加载完成回调（主线程执行）
 
-            self.column_search_status.config(text=f"共 {len(numeric_cols)} 列")
-            self.column_search_var.set(self._search_placeholder)
+        所有UI控件操作、图表更新都在这里执行，确保线程安全。
+        """
+        # 如果当前加载的文件已经不是用户最后选择的文件，忽略旧结果
+        if file_path != self._loading_file:
+            return
 
-            time_col = self.data_loader.get_time_column()
-            if time_col:
-                total_points = len(self.data_loader.data.get(time_col, []))
-                if total_points > self._max_data_points:
-                    if not self._data_warning_shown:
-                        self.status_label.config(
-                            text=f"警告: 数据量过大({total_points}点)，已启用性能模式"
-                        )
-                        self._data_warning_shown = True
-                        self.app_context['root'].after(3000, lambda: self.status_label.config(
-                            text=f"已加载: {os.path.basename(file_path)}"
-                        ))
-                else:
-                    self.status_label.config(text=f"已加载: {os.path.basename(file_path)}")
-            else:
-                self.status_label.config(text=f"已加载: {os.path.basename(file_path)}")
-
-            self._update_chart()
-        else:
+        if not success:
             self.status_label.config(text="加载失败")
+            return
+
+        # === 主线程安全操作：清理旧图表资源 ===
+        # 注意：切文件前先清空旧图，避免内存累积
+        try:
+            self.chart_manager.clear()
+            self.chart_manager.clear_crosshair()
+        except Exception:
+            pass
+        # 重置图表上下文跟踪（clear 已清掉 axes 全部状态，
+        # 需重新设置 labels/legend/grid）
+        self._last_chart_context = None
+
+        # 释放旧 data_loader 内存
+        if self.data_loader:
+            self.data_loader.clear()
+        self.data_loader = loader
+
+        self.current_file = file_path
+
+        # 更新列选择控件
+        numeric_cols = self.data_loader.get_numeric_columns()
+        self._all_columns = numeric_cols
+
+        self.column_combo['values'] = numeric_cols
+        if numeric_cols:
+            self.column_combo.set(numeric_cols[0])
+            self.current_column = numeric_cols[0]
+
+        self.column_search_status.config(text=f"共 {len(numeric_cols)} 列")
+        self.column_search_var.set(self._search_placeholder)
+
+        # 更新状态标签和图表
+        time_col = self.data_loader.get_time_column()
+        if time_col:
+            total_points = len(self.data_loader.data.get(time_col, []))
+            if total_points > self._max_data_points:
+                if not self._data_warning_shown:
+                    self.status_label.config(
+                        text=f"警告: 数据量过大({total_points}点)，已启用性能模式"
+                    )
+                    self._data_warning_shown = True
+                    self.app_context['root'].after(3000, lambda: self.status_label.config(
+                        text=f"已加载: {os.path.basename(file_path)}"
+                    ))
+                # 即使有警告也更新图表
+                self._update_chart()
+                return
+        self.status_label.config(text=f"已加载: {os.path.basename(file_path)}")
+        self._update_chart()
+
+    def _on_load_error(self, error_msg: str, file_path: str):
+        """CSV加载错误回调（主线程执行）"""
+        if file_path != self._loading_file:
+            return
+        self.status_label.config(text=f"加载失败: {error_msg[:50]}")
     
     def _on_column_search_changed(self, *args):
         """列搜索内容变化事件处理"""
@@ -291,11 +367,15 @@ class VisualizeTab(BaseTab):
         self._update_chart()
     
     def _update_chart(self):
-        """更新图表"""
+        """更新图表（方案4优化：增量更新）
+
+        原实现每次都 clear() 全图重建（曲线/labels/legend/grid 全部重来），
+        zoom/scroll 高频触发时开销大。现改为：
+        - 文件/列变化时：clear_all_lines + 重建曲线 + 重设 labels/legend/grid
+        - 仅 zoom/scroll 变化时：plot_data_cached 增量更新曲线数据
+        """
         if not self.current_column or not self.data_loader.data:
             return
-
-        self.chart_manager.clear()
 
         time_col = self.data_loader.get_time_column()
         if not time_col:
@@ -319,25 +399,34 @@ class VisualizeTab(BaseTab):
         start_idx = max(0, min(start_idx, total_points - visible_points))
         end_idx = min(start_idx + visible_points, total_points)
 
+        # 判断上下文（文件+列）是否变化
+        chart_context = (self.current_file, self.current_column)
+        context_changed = chart_context != self._last_chart_context
+        if context_changed:
+            # 清除旧曲线（保留坐标轴状态），并记录新上下文
+            self.chart_manager.clear_all_lines()
+            self._last_chart_context = chart_context
+
         if self.current_column in self.data_loader.data:
             y_data = self.data_loader.data[self.current_column][start_idx:end_idx]
             x_data = time_data[start_idx:end_idx]
 
-            valid_indices = [i for i, v in enumerate(y_data) if v is not None]
-
-            if valid_indices:
+            # 短路判断是否存在有效数据（避免构建整个索引列表）
+            if any(v is not None for v in y_data):
                 label = self.current_column.split('[')[0] if '[' in self.current_column else self.current_column
                 label = label.split('::')[-1] if '::' in label else label
 
-                self.chart_manager.plot_segments(
+                self.chart_manager.plot_data_cached(
                     x_data, y_data, label=label,
                     linewidth=1.5, antialiased=True
                 )
 
-        self.chart_manager.set_labels(time_col, "数值",
-                                       os.path.basename(self.current_file) if self.current_file else "")
-        self.chart_manager.add_legend()
-        self.chart_manager.add_grid()
+        # labels/legend/grid 仅在上下文变化时设置（zoom/scroll时跳过）
+        if context_changed:
+            self.chart_manager.set_labels(time_col, "数值",
+                                           os.path.basename(self.current_file) if self.current_file else "")
+            self.chart_manager.add_legend()
+            self.chart_manager.add_grid()
 
         self.chart_manager.clear_crosshair()
         self.chart_manager.update()
@@ -432,6 +521,12 @@ class VisualizeTab(BaseTab):
 
     def cleanup(self):
         """清理资源，防止内存泄漏"""
+        # 先取消后台加载线程
+        self._load_cancel_event.set()
+        if self._load_thread and self._load_thread.is_alive():
+            self._load_thread.join(timeout=1.0)
+        self._load_thread = None
+
         if self.chart_manager:
             self.chart_manager.destroy()
             self.chart_manager = None

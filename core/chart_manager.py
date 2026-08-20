@@ -75,6 +75,10 @@ class ChartManager:
         self._downsample_enabled: bool = True
         self._last_render_time: float = 0
         self._min_render_interval: float = 0.033
+
+        # 方案3优化：增量绘制缓存
+        # key: 曲线label, value: 该label对应的Line2D对象列表（分段时多个）
+        self._line_cache: dict = {}
     
     def get_widget(self) -> tk.Widget:
         """获取画布控件"""
@@ -97,8 +101,24 @@ class ChartManager:
         return toolbar
     
     def clear(self):
-        """清除图表"""
+        """清除图表（方案3优化：同步清空曲线缓存，避免持有失效的Line2D引用）"""
+        self._line_cache.clear()
         self.ax.clear()
+
+    def clear_all_lines(self):
+        """
+        仅清除缓存的曲线，保留坐标轴标签/网格/图例等设置（方案3新增）
+
+        用于切换文件/切换列的场景，配合 plot_data_cached 使用：
+        相比 clear() 不会重置 axes 状态，避免重复设置 labels/legend/grid。
+        """
+        for lines in self._line_cache.values():
+            for line in lines:
+                try:
+                    line.remove()
+                except Exception:
+                    pass
+        self._line_cache.clear()
     
     def plot_data(self, x_data: List, y_data: List, label: str = "", 
                   linewidth: float = 1.5, color: Any = None, **kwargs):
@@ -137,10 +157,93 @@ class ChartManager:
 
         x_data, y_data = self._downsample_data(x_data, y_data)
 
+        segments = self._build_segments(y_data, max_gap)
+
+        first_segment = True
+        for segment in segments:
+            if len(segment) > 0:
+                x_segment = [x_data[i] for i in segment]
+                y_segment = [y_data[i] for i in segment]
+                seg_label = label if first_segment else None
+                first_segment = False
+                self.ax.plot(x_segment, y_segment, label=seg_label, **kwargs)
+
+    def plot_data_cached(self, x_data: List, y_data: List, label: str = "",
+                         max_gap: int = 2, **kwargs):
+        """
+        增量绘制数据曲线（方案3新增）
+
+        与 plot_segments 行为一致（分段+降采样），但增加增量复用：
+        当该label已缓存的曲线分段数与新数据一致时，直接复用已有
+        Line2D对象调用 set_data 更新数据，避免销毁/重建曲线对象。
+
+        适用于 zoom/scroll 等高频更新场景（数据形状基本不变）。
+
+        Args:
+            x_data: X轴数据
+            y_data: Y轴数据
+            label: 曲线标签
+            max_gap: 最大允许间隔
+            **kwargs: 其他参数（仅重建时使用）
+        """
+        if not x_data or not y_data:
+            return
+
+        if len(x_data) != len(y_data):
+            return
+
+        x_data, y_data = self._downsample_data(x_data, y_data)
+
+        segments = self._build_segments(y_data, max_gap)
+        if not segments:
+            return
+
+        cached_lines = self._line_cache.get(label)
+
+        # 增量复用：分段数一致时仅更新数据
+        if cached_lines is not None and len(cached_lines) == len(segments):
+            for seg, line in zip(segments, cached_lines):
+                line.set_data([x_data[i] for i in seg],
+                              [y_data[i] for i in seg])
+            return
+
+        # 分段数变化：移除旧线并重建该label的曲线
+        if cached_lines:
+            for old_line in cached_lines:
+                try:
+                    old_line.remove()
+                except Exception:
+                    pass
+
+        new_lines = []
+        first_segment = True
+        for segment in segments:
+            if len(segment) > 0:
+                x_segment = [x_data[i] for i in segment]
+                y_segment = [y_data[i] for i in segment]
+                seg_label = label if first_segment else None
+                first_segment = False
+                line, = self.ax.plot(x_segment, y_segment,
+                                     label=seg_label, **kwargs)
+                new_lines.append(line)
+
+        self._line_cache[label] = new_lines
+
+    def _build_segments(self, y_data: List, max_gap: int = 2) -> List[List[int]]:
+        """
+        构建有效数据段的索引列表（跳过None缺口，方案3从plot_segments提取）
+
+        Args:
+            y_data: Y轴数据（可含None）
+            max_gap: 相邻有效索引最大允许间隔
+
+        Returns:
+            List[List[int]]: 分段索引列表，无有效数据时为空列表
+        """
         valid_indices = [i for i, v in enumerate(y_data) if v is not None]
 
         if not valid_indices:
-            return
+            return []
 
         segments = []
         current_segment = [valid_indices[0]]
@@ -158,14 +261,7 @@ class ChartManager:
         if current_segment:
             segments.append(current_segment)
 
-        first_segment = True
-        for segment in segments:
-            if len(segment) > 0:
-                x_segment = [x_data[i] for i in segment]
-                y_segment = [y_data[i] for i in segment]
-                seg_label = label if first_segment else None
-                first_segment = False
-                self.ax.plot(x_segment, y_segment, label=seg_label, **kwargs)
+        return segments
 
     def _downsample_data(self, x_data: List, y_data: List) -> Tuple[List, List]:
         """
@@ -257,10 +353,15 @@ class ChartManager:
         self.ax.legend(loc=loc, fontsize=fontsize)
     
     def update(self):
-        """更新图表显示"""
+        """更新图表显示（方案3优化：draw_idle异步重绘）
+        
+        相比 canvas.draw() 的同步全量重绘，draw_idle 将绘制排入
+        事件循环空闲时机，高频调用（zoom/scroll防抖后）会自动合并，
+        避免阻塞Tk主线程造成卡顿。
+        """
         self._apply_xaxis_datetime_format()
         self.figure.tight_layout()
-        self.canvas.draw()
+        self.canvas.draw_idle()
     
     def draw_idle(self):
         """空闲时重绘"""
@@ -383,6 +484,7 @@ class ChartManager:
         应在销毁图表或关闭窗口时调用。
         """
         self.clear_crosshair()
+        self._line_cache.clear()
 
         if hasattr(self, 'ax') and self.ax:
             self.ax.clear()
