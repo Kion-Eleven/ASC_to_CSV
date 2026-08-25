@@ -11,14 +11,15 @@
 
 import tkinter as tk
 from typing import List, Optional, Tuple, Any
-import numpy as np
 
+import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from matplotlib.transforms import ScaledTranslation
 from datetime import datetime
 
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -43,8 +44,6 @@ class ChartManager:
         zoom_level: 缩放级别
         scroll_position: 滚动位置
         max_render_points: 最大渲染数据点数
-        _downsample_enabled: 是否启用降采样
-        _last_render_time: 上次渲染时间
     """
 
     def __init__(self, master: tk.Widget, figsize: Tuple[float, float] = (12, 6),
@@ -67,14 +66,10 @@ class ChartManager:
         self.scroll_position: float = 0.0
         self.max_render_points: int = max_render_points
 
-        self._crosshair_enabled: bool = False
+        # 数据点提示元素：垂直虚线、加粗标记点、坐标标注
         self._crosshair_vline: Optional[Any] = None
-        self._crosshair_hline: Optional[Any] = None
+        self._datatip_marker: Optional[Any] = None
         self._coord_annotation: Optional[Any] = None
-
-        self._downsample_enabled: bool = True
-        self._last_render_time: float = 0
-        self._min_render_interval: float = 0.033
 
         # 方案3优化：增量绘制缓存
         # key: 曲线label, value: 该label对应的Line2D对象列表（分段时多个）
@@ -102,6 +97,10 @@ class ChartManager:
     
     def clear(self):
         """清除图表（方案3优化：同步清空曲线缓存，避免持有失效的Line2D引用）"""
+        # ax.clear() 会移除所有 artist（含数据点提示元素），这里仅重置引用
+        self._crosshair_vline = None
+        self._datatip_marker = None
+        self._coord_annotation = None
         self._line_cache.clear()
         self.ax.clear()
 
@@ -119,22 +118,6 @@ class ChartManager:
                 except Exception:
                     pass
         self._line_cache.clear()
-    
-    def plot_data(self, x_data: List, y_data: List, label: str = "", 
-                  linewidth: float = 1.5, color: Any = None, **kwargs):
-        """
-        绘制数据曲线
-        
-        Args:
-            x_data: X轴数据
-            y_data: Y轴数据
-            label: 曲线标签
-            linewidth: 线宽
-            color: 颜色
-            **kwargs: 其他参数
-        """
-        self.ax.plot(x_data, y_data, label=label, linewidth=linewidth, 
-                    color=color, antialiased=True, **kwargs)
     
     def plot_segments(self, x_data: List, y_data: List, label: str = "",
                       max_gap: int = 2, **kwargs):
@@ -192,6 +175,10 @@ class ChartManager:
         if len(x_data) != len(y_data):
             return
 
+        # 数据即将变化，清除吸附在旧数据上的十字光标，
+        # 避免其旧坐标参与 relim 污染坐标范围
+        self.clear_crosshair()
+
         x_data, y_data = self._downsample_data(x_data, y_data)
 
         segments = self._build_segments(y_data, max_gap)
@@ -205,29 +192,37 @@ class ChartManager:
             for seg, line in zip(segments, cached_lines):
                 line.set_data([x_data[i] for i in seg],
                               [y_data[i] for i in seg])
-            return
+        else:
+            # 分段数变化：移除旧线并重建该label的曲线
+            if cached_lines:
+                for old_line in cached_lines:
+                    try:
+                        old_line.remove()
+                    except Exception:
+                        pass
 
-        # 分段数变化：移除旧线并重建该label的曲线
-        if cached_lines:
-            for old_line in cached_lines:
-                try:
-                    old_line.remove()
-                except Exception:
-                    pass
+            new_lines = []
+            first_segment = True
+            for segment in segments:
+                if len(segment) > 0:
+                    x_segment = [x_data[i] for i in segment]
+                    y_segment = [y_data[i] for i in segment]
+                    seg_label = label if first_segment else None
+                    first_segment = False
+                    line, = self.ax.plot(x_segment, y_segment,
+                                         label=seg_label, **kwargs)
+                    new_lines.append(line)
 
-        new_lines = []
-        first_segment = True
-        for segment in segments:
-            if len(segment) > 0:
-                x_segment = [x_data[i] for i in segment]
-                y_segment = [y_data[i] for i in segment]
-                seg_label = label if first_segment else None
-                first_segment = False
-                line, = self.ax.plot(x_segment, y_segment,
-                                     label=seg_label, **kwargs)
-                new_lines.append(line)
+            self._line_cache[label] = new_lines
 
-        self._line_cache[label] = new_lines
+        # 坐标范围必须随数据窗口刷新，原因有二：
+        # 1) set_data 增量更新不会触发坐标轴自动缩放，若不重算范围，
+        #    放大后曲线只占画面左侧、右侧空白；
+        # 2) 工具栏"zoom to rectangle"/平移会关闭坐标轴自动缩放，
+        #    重新启用后"重置"按钮才能恢复标准视图。
+        self.ax.set_autoscale_on(True)
+        self.ax.relim()
+        self.ax.autoscale_view()
 
     def _build_segments(self, y_data: List, max_gap: int = 2) -> List[List[int]]:
         """
@@ -293,31 +288,6 @@ class ChartManager:
         """
         self.max_render_points = max(100, min(max_points, MAX_RENDER_POINTS))
 
-    def enable_downsample(self, enabled: bool):
-        """
-        启用/禁用降采样
-
-        Args:
-            enabled: 是否启用
-        """
-        self._downsample_enabled = enabled
-
-    def should_render(self) -> bool:
-        """
-        检查是否可以进行渲染（频率限制）
-
-        Returns:
-            bool: 是否可以渲染
-        """
-        import time
-        current_time = time.time()
-
-        if current_time - self._last_render_time < self._min_render_interval:
-            return False
-
-        self._last_render_time = current_time
-        return True
-    
     def set_labels(self, xlabel: str, ylabel: str, title: str = ""):
         """
         设置坐标轴标签和标题
@@ -445,36 +415,100 @@ class ChartManager:
         self.canvas.mpl_connect('motion_notify_event', callback)
     
     def clear_crosshair(self):
-        """清除十字参考线"""
-        if self._crosshair_vline:
-            self._crosshair_vline.remove()
-            self._crosshair_vline = None
-        if self._crosshair_hline:
-            self._crosshair_hline.remove()
-            self._crosshair_hline = None
-        if self._coord_annotation:
-            self._coord_annotation.remove()
-            self._coord_annotation = None
-    
-    def update_crosshair(self, x: float, y: float):
+        """清除数据点提示（垂直虚线、加粗标记点和坐标标注）"""
+        for attr in ('_crosshair_vline', '_datatip_marker', '_coord_annotation'):
+            artist = getattr(self, attr, None)
+            if artist is not None:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def update_datatip(self, x_mouse: float, y_mouse: float) -> Optional[Tuple[float, float]]:
         """
-        更新十字参考线位置
-        
+        更新数据点提示
+
+        从鼠标指针向曲线引一条垂直虚线（X 吸附到曲线上最近的真实采样点），
+        虚线与曲线的交点加粗标记，并在旁边标注该点坐标（时间 + 数值）。
+        多条曲线时只标记在吸附X处Y值与鼠标最接近的一条曲线。
+
         Args:
-            x: X坐标
-            y: Y坐标
+            x_mouse: 鼠标X坐标（数据坐标）
+            y_mouse: 鼠标Y坐标（数据坐标）
+
+        Returns:
+            Optional[Tuple[float, float]]: 吸附到的数据点 (x, y)，无有效曲线时为 None
         """
-        if self._crosshair_vline:
-            self._crosshair_vline.set_xdata([x, x])
+        best = None  # (Y距离, x, y, 曲线颜色)
+        for line in self.ax.lines:
+            if line is self._crosshair_vline or line is self._datatip_marker:
+                continue
+            try:
+                xs = np.asarray(line.get_xdata(), dtype=float)
+                ys = np.asarray(line.get_ydata(), dtype=float)
+            except (TypeError, ValueError):
+                continue
+            if len(xs) == 0:
+                continue
+            mask = np.isfinite(xs) & np.isfinite(ys)
+            if not mask.any():
+                continue
+            xs, ys = xs[mask], ys[mask]
+            idx = int(np.argmin(np.abs(xs - x_mouse)))
+            dist_y = abs(float(ys[idx]) - y_mouse)
+            if best is None or dist_y < best[0]:
+                best = (dist_y, float(xs[idx]), float(ys[idx]), line.get_color())
+
+        if best is None:
+            self.clear_crosshair()
+            return None
+
+        _, x_pt, y_pt, color = best
+
+        # 垂直虚线：从鼠标指针指向数据点
+        if self._crosshair_vline is not None:
+            self._crosshair_vline.set_data([x_pt, x_pt], [y_mouse, y_pt])
         else:
-            self._crosshair_vline = self.ax.axvline(x=x, color='gray', 
-                                                     linestyle='--', linewidth=1, alpha=0.7)
-        
-        if self._crosshair_hline:
-            self._crosshair_hline.set_ydata([y, y])
+            self._crosshair_vline, = self.ax.plot(
+                [x_pt, x_pt], [y_mouse, y_pt],
+                color='gray', linestyle='--', linewidth=1, alpha=0.8, zorder=5)
+
+        # 加粗标记数据点
+        if self._datatip_marker is not None:
+            self._datatip_marker.set_data([x_pt], [y_pt])
+            self._datatip_marker.set_color(color)
         else:
-            self._crosshair_hline = self.ax.axhline(y=y, color='gray',
-                                                     linestyle='--', linewidth=1, alpha=0.7)
+            self._datatip_marker, = self.ax.plot(
+                [x_pt], [y_pt], linestyle='None', marker='o', markersize=7,
+                color=color, markeredgecolor='white', markeredgewidth=1.2, zorder=6)
+
+        # 坐标标注（靠近右边缘时翻转到左侧，避免被裁剪）
+        if self._coord_annotation is None:
+            self._coord_annotation = self.ax.text(x_pt, y_pt, '', fontsize=9)
+        self._coord_annotation.set_text(self._format_datatip_text(x_pt, y_pt))
+        self._coord_annotation.set_position((x_pt, y_pt))
+        self._coord_annotation.set_color(color)
+        x_min, x_max = self.ax.get_xlim()
+        near_right = x_max > x_min and (x_max - x_pt) < (x_pt - x_min)
+        dx = -8 if near_right else 8
+        offset_tr = ScaledTranslation(dx / 72, 8 / 72, self.figure.dpi_scale_trans)
+        self._coord_annotation.set_transform(self.ax.transData + offset_tr)
+        self._coord_annotation.set_ha('right' if near_right else 'left')
+
+        return (x_pt, y_pt)
+
+    @staticmethod
+    def _format_datatip_text(x: float, y: float) -> str:
+        """格式化数据点提示文本：时间为 MM-DD HH:MM:SS（epoch秒）或数值"""
+        x_text = f"{x:.2f}"
+        if x >= 1e9:  # 与 _apply_xaxis_datetime_format 一致：epoch 秒视为时间
+            try:
+                dt = datetime.fromtimestamp(x)
+                x_text = dt.strftime('%m-%d %H:%M:%S')
+            except (OSError, OverflowError, ValueError):
+                pass
+        return f"{x_text}, {y:.6g}"
 
     def destroy(self):
         """

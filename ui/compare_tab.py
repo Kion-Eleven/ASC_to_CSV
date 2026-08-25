@@ -9,14 +9,21 @@ import os
 import time
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from typing import Optional, List, Dict, Tuple
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base import BaseTab
-from core.csv_loader import CSVDataLoader, MULTI_SELECT_COLUMNS
+from core.csv_loader import CSVDataLoader, MULTI_SELECT_COLUMNS, read_csv_column_sample
 from core.chart_manager import ChartManager
+from core.compare_export import (
+    is_time_column,
+    read_csv_header,
+    resolve_matching_column,
+    strip_column_prefix,
+    write_export_csv,
+)
 
 
 BATCH_SIZE = 10000
@@ -24,15 +31,55 @@ MAX_CONCURRENT_LOADS = 3
 PROGRESS_UPDATE_INTERVAL = 100
 
 
+def _extract_file_id(file_name: str) -> str:
+    """
+    从文件名提取编号，用于括号标注
+
+    规则：BATP5.csv -> '5'，BATPQ.csv -> 'Q'，BATP10.csv -> '10'；
+    非BATP*文件（如Others.csv）统一返回 '0'。
+
+    Args:
+        file_name: CSV文件名
+
+    Returns:
+        str: 文件编号
+    """
+    base = file_name[:-4] if file_name.lower().endswith('.csv') else file_name
+    if base.upper().startswith('BATP') and len(base) > 4:
+        return base[4:]
+    return '0'
+
+
+def _file_id_sort_key(file_id: str):
+    """
+    括号内文件编号的排序键：0在前，数字升序，字母顺序
+
+    Args:
+        file_id: 文件编号
+
+    Returns:
+        tuple: 排序键
+    """
+    if file_id == '0':
+        return (0, 0, '')
+    if file_id.isdigit():
+        return (1, int(file_id), '')
+    return (2, 0, file_id)
+
+
 class CompareTab(BaseTab):
     """
     数据对比标签页
 
     提供多文件数据对比功能，支持异步加载和进度显示。
+    支持固定复选框列与搜索添加的公有数据列（跨文件统一列名）两种选择方式。
 
     Attributes:
         compare_file_listbox: 文件列表框
         compare_column_vars: 数据列选择变量字典
+        compare_selected_listbox: 已选择数据列列表框
+        compare_search_entry: 数据列搜索输入框
+        compare_search_listbox: 数据列搜索结果列表框
         chart_manager: 图表管理器
     """
 
@@ -47,6 +94,16 @@ class CompareTab(BaseTab):
         self.compare_file_listbox: Optional[tk.Listbox] = None
         self.compare_column_vars: Dict[str, tk.BooleanVar] = {}
         self.chart_manager: Optional[ChartManager] = None
+
+        self.compare_selected_listbox: Optional[tk.Listbox] = None
+        self.compare_search_entry: Optional[ttk.Entry] = None
+        self.compare_search_listbox: Optional[tk.Listbox] = None
+        self._search_var: Optional[tk.StringVar] = None
+
+        self._column_pool: Dict[str, List[str]] = {}
+        self._pool_file_count: int = 0
+        self._search_results: List[str] = []
+        self._selected_unified_columns: List[str] = []
 
         self.compare_zoom_level: float = 1.0
         self.compare_scroll_position: float = 0.0
@@ -65,6 +122,7 @@ class CompareTab(BaseTab):
         self.compare_zoom_label: Optional[ttk.Label] = None
         self.compare_scroll_scale: Optional[ttk.Scale] = None
         self.compare_status_label: Optional[ttk.Label] = None
+        self._datatip_var: Optional[tk.BooleanVar] = None
 
         self._compare_thread: Optional[threading.Thread] = None
         self._cancel_event: threading.Event = threading.Event()
@@ -72,6 +130,9 @@ class CompareTab(BaseTab):
 
         self._progress_bar: Optional[ttk.Progressbar] = None
         self._cancel_btn: Optional[ttk.Button] = None
+        self._export_btn: Optional[ttk.Button] = None
+        self._export_thread: Optional[threading.Thread] = None
+        self._is_exporting: bool = False
 
         super().__init__(parent, app_context)
 
@@ -102,6 +163,7 @@ class CompareTab(BaseTab):
         self.chart_manager.add_toolbar(chart_frame)
 
         self.chart_manager.bind_scroll(self._on_mouse_scroll)
+        self.chart_manager.bind_motion(self._on_mouse_move)
 
         status_frame = ttk.Frame(self)
         status_frame.pack(fill=tk.X, pady=(5, 0))
@@ -109,7 +171,7 @@ class CompareTab(BaseTab):
         self.compare_status_label.pack(side=tk.LEFT)
 
     def _create_file_section(self, parent: ttk.Frame):
-        """创建文件选择区域"""
+        """创建文件选择区域（含已选择数据列、搜索和添加/删除/清空按钮）"""
         file_frame = ttk.Frame(parent)
         file_frame.pack(fill=tk.X, pady=5)
 
@@ -118,7 +180,9 @@ class CompareTab(BaseTab):
         listbox_frame = ttk.Frame(file_frame)
         listbox_frame.pack(side=tk.LEFT, padx=5)
 
-        self.compare_file_listbox = tk.Listbox(listbox_frame, height=4, selectmode=tk.MULTIPLE, width=40)
+        self.compare_file_listbox = tk.Listbox(
+            listbox_frame, height=4, selectmode=tk.MULTIPLE,
+            width=40, exportselection=False)
         self.compare_file_listbox.pack(side=tk.LEFT)
 
         self.compare_file_listbox.bind('<MouseWheel>', self._on_file_list_scroll)
@@ -128,7 +192,67 @@ class CompareTab(BaseTab):
         self.compare_file_listbox.bind('<Enter>', self._on_listbox_enter)
         self.compare_file_listbox.bind('<Leave>', self._on_listbox_leave)
 
+        # 文件选择变化时重建数据列搜索池
+        self.compare_file_listbox.bind('<<ListboxSelect>>', self._on_file_selection_changed)
+
         ttk.Button(file_frame, text="刷新文件", command=self._refresh_files).pack(side=tk.LEFT, padx=5)
+
+        # 已选择数据列框
+        selected_frame = ttk.Frame(file_frame)
+        selected_frame.pack(side=tk.LEFT, padx=(15, 5))
+
+        ttk.Label(selected_frame, text="已选择数据列:").pack(anchor=tk.W)
+
+        self.compare_selected_listbox = tk.Listbox(
+            selected_frame, height=4, selectmode=tk.MULTIPLE,
+            width=28, exportselection=False)
+        self.compare_selected_listbox.pack()
+        self._setup_listbox_scrolling(self.compare_selected_listbox)
+
+        # 搜索框 + 搜索结果列表
+        search_frame = ttk.Frame(file_frame)
+        search_frame.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(search_frame, text="搜索数据列:").pack(anchor=tk.W)
+
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add('write', lambda *_: self._refresh_search_results())
+        self.compare_search_entry = ttk.Entry(search_frame, textvariable=self._search_var, width=30)
+        self.compare_search_entry.pack(fill=tk.X)
+
+        self.compare_search_listbox = tk.Listbox(
+            search_frame, height=3, selectmode=tk.MULTIPLE,
+            width=30, exportselection=False)
+        self.compare_search_listbox.pack()
+        self._setup_listbox_scrolling(self.compare_search_listbox)
+
+        # 添加 / 删除 / 清空按钮
+        column_btn_frame = ttk.Frame(file_frame)
+        column_btn_frame.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(column_btn_frame, text="添加", command=self._add_selected_columns).pack(pady=1)
+        ttk.Button(column_btn_frame, text="删除", command=self._remove_selected_columns).pack(pady=1)
+        ttk.Button(column_btn_frame, text="清空", command=self._clear_selected_columns).pack(pady=1)
+
+    def _setup_listbox_scrolling(self, listbox: tk.Listbox):
+        """为列表框绑定鼠标滚轮滚动和悬停聚焦"""
+        listbox.bind('<Enter>', lambda e: listbox.focus_set())
+
+        def on_wheel(event):
+            listbox.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+            return "break"
+
+        def on_button4(event):
+            listbox.yview_scroll(-1, 'units')
+            return "break"
+
+        def on_button5(event):
+            listbox.yview_scroll(1, 'units')
+            return "break"
+
+        listbox.bind('<MouseWheel>', on_wheel)
+        listbox.bind('<Button-4>', on_button4)
+        listbox.bind('<Button-5>', on_button5)
 
     def _create_column_section(self, parent: ttk.Frame):
         """创建数据列选择区域"""
@@ -157,6 +281,9 @@ class CompareTab(BaseTab):
         self._cancel_btn = ttk.Button(btn_frame, text="取消", command=self._cancel_compare, state=tk.DISABLED)
         self._cancel_btn.pack(side=tk.LEFT, padx=5)
 
+        self._export_btn = ttk.Button(btn_frame, text="导出选中列", command=self._export_selected_columns)
+        self._export_btn.pack(side=tk.LEFT, padx=5)
+
         ttk.Label(btn_frame, text="缩放:").pack(side=tk.LEFT, padx=(20, 0))
         self.compare_zoom_scale = ttk.Scale(btn_frame, from_=0.1, to=5.0, value=1.0,
                                              orient=tk.HORIZONTAL, length=100,
@@ -174,6 +301,10 @@ class CompareTab(BaseTab):
         self.compare_scroll_scale.pack(side=tk.LEFT, padx=5)
 
         ttk.Button(btn_frame, text="重置滚动", command=self._reset_scroll).pack(side=tk.LEFT, padx=10)
+
+        self._datatip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(btn_frame, text="显示数据提示", variable=self._datatip_var,
+                        command=self._toggle_datatip).pack(side=tk.LEFT, padx=(15, 0))
 
     def _create_progress_section(self, parent: ttk.Frame):
         """创建进度显示区域"""
@@ -249,28 +380,171 @@ class CompareTab(BaseTab):
         return "break"
 
     def _refresh_files(self):
-        """刷新文件列表"""
+        """刷新文件列表（排除Summary.csv汇总表）"""
         output_dir = self.app_context.get('output_dir', '')
         if not output_dir or not os.path.exists(output_dir):
             messagebox.showwarning("提示", "请先进行数据转换或设置输出目录")
             return
 
-        csv_files = [f for f in os.listdir(output_dir) if f.endswith('.csv')]
+        csv_files = [f for f in os.listdir(output_dir)
+                     if f.endswith('.csv') and f.lower() != 'summary.csv']
 
         self.compare_file_listbox.delete(0, tk.END)
         for f in csv_files:
             self.compare_file_listbox.insert(tk.END, f)
 
+        # 列表重建后选择被清空，同步清空数据列搜索池
+        self._rebuild_column_pool()
+
         self.compare_status_label.config(text=f"已加载 {len(csv_files)} 个文件")
+
+    def _on_file_selection_changed(self, event=None):
+        """文件选择变化时重建数据列搜索池"""
+        self._rebuild_column_pool()
+
+    def _rebuild_column_pool(self):
+        """
+        根据当前选中的文件重建公有数据列搜索池
+
+        读取各选中文件的表头和采样数据，将数值列按公有名称
+        （去掉首个下划线前缀）聚合，记录拥有该列的文件。
+        """
+        self._column_pool = {}
+        self._pool_file_count = 0
+        if self.compare_file_listbox is None:
+            return
+
+        selected = self.compare_file_listbox.curselection()
+        if not selected:
+            self._refresh_search_results()
+            return
+
+        self._pool_file_count = len(selected)
+        output_dir = self.app_context.get('output_dir', '')
+
+        for i in selected:
+            file_name = self.compare_file_listbox.get(i)
+            numeric_cols = read_csv_column_sample(os.path.join(output_dir, file_name))
+            if not numeric_cols:
+                continue
+
+            unified_names = {strip_column_prefix(col) for col in numeric_cols}
+            for unified in unified_names:
+                self._column_pool.setdefault(unified, []).append(file_name)
+
+        self._refresh_search_results()
+
+    def _format_column_display(self, unified: str) -> str:
+        """
+        生成公有列的显示文本
+
+        所有选中文件都有该列时不带括号；仅部分文件有时，
+        括号中标注拥有该列的文件编号（排序：0、数字升序、字母）。
+
+        Args:
+            unified: 公有列名
+
+        Returns:
+            str: 显示文本，如 'AvgCellTemp[C]' 或 'AvgCellTemp[C](3,5)'
+        """
+        file_names = self._column_pool.get(unified, [])
+        if not file_names:
+            return unified
+        if self._pool_file_count > 0 and len(file_names) >= self._pool_file_count:
+            return unified
+        ids = sorted({_extract_file_id(f) for f in file_names}, key=_file_id_sort_key)
+        return f"{unified}({','.join(ids)})"
+
+    def _refresh_search_results(self):
+        """根据搜索框内容刷新搜索结果列表"""
+        if self.compare_search_listbox is None:
+            return
+
+        keyword = ''
+        if self._search_var is not None:
+            keyword = self._search_var.get().strip().lower()
+
+        self.compare_search_listbox.delete(0, tk.END)
+        self._search_results = []
+
+        for unified in sorted(self._column_pool.keys(), key=lambda s: s.lower()):
+            display = self._format_column_display(unified)
+            if keyword and keyword not in display.lower():
+                continue
+            self.compare_search_listbox.insert(tk.END, display)
+            self._search_results.append(unified)
+
+    def _add_selected_columns(self):
+        """将搜索结果中选中的公有列添加到已选择数据列框"""
+        if self.compare_search_listbox is None:
+            return
+
+        indices = self.compare_search_listbox.curselection()
+        if not indices:
+            messagebox.showinfo("提示", "请先在搜索结果中选择要添加的数据列")
+            return
+
+        for idx in indices:
+            if idx >= len(self._search_results):
+                continue
+            unified = self._search_results[idx]
+            if unified in self._selected_unified_columns:
+                continue
+            self._selected_unified_columns.append(unified)
+            self.compare_selected_listbox.insert(tk.END, self._format_column_display(unified))
+
+        self.compare_status_label.config(
+            text=f"已选择 {len(self._selected_unified_columns)} 个数据列")
+
+    def _remove_selected_columns(self):
+        """删除已选择数据列框中选中的条目"""
+        if self.compare_selected_listbox is None:
+            return
+
+        indices = self.compare_selected_listbox.curselection()
+        if not indices:
+            messagebox.showinfo("提示", "请先在已选择数据列框中选择要删除的条目")
+            return
+
+        for idx in sorted(indices, reverse=True):
+            del self._selected_unified_columns[idx]
+            self.compare_selected_listbox.delete(idx)
+
+        self.compare_status_label.config(
+            text=f"已选择 {len(self._selected_unified_columns)} 个数据列")
+
+    def _clear_selected_columns(self):
+        """清空已选择数据列"""
+        self._selected_unified_columns.clear()
+        if self.compare_selected_listbox is not None:
+            self.compare_selected_listbox.delete(0, tk.END)
+        self.compare_status_label.config(text="已清空已选择数据列")
+
+    def _get_column_requests(self) -> List[Tuple[str, str]]:
+        """
+        构建绘图列请求列表
+
+        固定复选框列在前（子串匹配），搜索添加的公有列在后（剥离规则精确匹配）。
+        去重时先解析的生效，保证重复内容在图中只显示一次。
+
+        Returns:
+            List[Tuple[str, str]]: (类型, 列名) 列表，类型为 'fixed' 或 'unified'
+        """
+        fixed = [('fixed', col) for col, var in self.compare_column_vars.items() if var.get()]
+        unified = [('unified', col) for col in self._selected_unified_columns]
+        return fixed + unified
 
     def _start_compare(self):
         """开始异步对比操作"""
+        if self._is_exporting:
+            return
+
         selected_files = self.compare_file_listbox.curselection()
         if not selected_files:
             messagebox.showwarning("提示", "请至少选择一个文件")
             return
 
-        selected_columns = [col for col, var in self.compare_column_vars.items() if var.get()]
+        selected_columns = self._get_column_requests()
         if not selected_columns:
             messagebox.showwarning("提示", "请至少选择一个数据列")
             return
@@ -279,6 +553,8 @@ class CompareTab(BaseTab):
         self._cancel_event.clear()
         self._compare_btn.config(state=tk.DISABLED)
         self._cancel_btn.config(state=tk.NORMAL)
+        if self._export_btn is not None:
+            self._export_btn.config(state=tk.DISABLED)
         self._progress_bar.config(value=0)
         self._progress_label.config(text="准备中...")
 
@@ -296,7 +572,7 @@ class CompareTab(BaseTab):
         self._cancel_event.set()
         self._progress_label.config(text="正在取消...")
 
-    def _async_generate_chart(self, file_names: List[str], selected_columns: List[str]):
+    def _async_generate_chart(self, file_names: List[str], selected_columns: List[Tuple[str, str]]):
         """异步生成对比图表（在线程中执行）"""
         def on_render_complete(success: bool, cancelled: bool):
             if cancelled or not success:
@@ -328,13 +604,13 @@ class CompareTab(BaseTab):
         except Exception as e:
             self._on_compare_error(str(e))
 
-    def _load_files_async(self, file_names: List[str], selected_columns: List[str]) -> Dict:
+    def _load_files_async(self, file_names: List[str], selected_columns: List[Tuple[str, str]]) -> Dict:
         """
         异步加载多个文件
 
         Args:
             file_names: 文件名列表
-            selected_columns: 选中的列名
+            selected_columns: 选中的列请求列表，元素为 (类型, 列名)
 
         Returns:
             Dict: 文件路径到加载数据的映射
@@ -368,14 +644,16 @@ class CompareTab(BaseTab):
 
         return loaded_data
 
-    def _load_single_file(self, file_path: str, file_name: str, selected_columns: List[str]) -> Optional[Dict]:
+    def _load_single_file(self, file_path: str, file_name: str, selected_columns: List[Tuple[str, str]]) -> Optional[Dict]:
         """
         加载单个CSV文件并进行预处理
 
         Args:
             file_path: 文件路径
             file_name: 文件名
-            selected_columns: 选中的列名
+            selected_columns: 选中的列请求列表，元素为 (类型, 列名)，
+                类型 'fixed' 为固定复选框列（子串匹配），
+                类型 'unified' 为搜索添加的公有列（剥离规则精确匹配）
 
         Returns:
             Dict: 包含时间列和选中列的数据
@@ -396,15 +674,15 @@ class CompareTab(BaseTab):
         time_data = self._downsample_data(loader.data[time_col], BATCH_SIZE)
 
         col_data = {}
-        for target_col in selected_columns:
-            matching_col = None
-            for col in loader.columns:
-                if target_col in col:
-                    matching_col = col
-                    break
+        used_columns = set()
+        for req_type, target_col in selected_columns:
+            matching_col = resolve_matching_column(loader, req_type, target_col, time_col)
 
-            if matching_col:
-                col_data[target_col] = self._downsample_data(loader.data[matching_col], BATCH_SIZE)
+            # 同一文件中解析到相同实际列名时只保留先解析的（重复内容只显示一次）
+            if matching_col and matching_col not in used_columns:
+                used_columns.add(matching_col)
+                col_data[(req_type, target_col)] = self._downsample_data(
+                    loader.data[matching_col], BATCH_SIZE)
 
         return {
             'time_data': time_data,
@@ -430,13 +708,13 @@ class CompareTab(BaseTab):
         indices = [int(i * step) for i in range(max_points)]
         return [data[i] if i < len(data) else None for i in indices]
 
-    def _process_compare_data(self, loaded_data: Dict, selected_columns: List[str]) -> Dict:
+    def _process_compare_data(self, loaded_data: Dict, selected_columns: List[Tuple[str, str]]) -> Dict:
         """
         处理对比数据
 
         Args:
             loaded_data: 加载的文件数据
-            selected_columns: 选中的列名
+            selected_columns: 选中的列请求列表，元素为 (类型, 列名)
 
         Returns:
             Dict: 处理后的数据
@@ -465,7 +743,7 @@ class CompareTab(BaseTab):
             'file_count': len(loaded_data)
         }
 
-    def _render_chart(self, processed_data: Dict, file_names: List[str], selected_columns: List[str],
+    def _render_chart(self, processed_data: Dict, file_names: List[str], selected_columns: List[Tuple[str, str]],
                       render_complete_callback: callable):
         """
         在主线程中渲染图表（线程安全版本）
@@ -473,7 +751,7 @@ class CompareTab(BaseTab):
         Args:
             processed_data: 处理后的数据
             file_names: 文件名列表
-            selected_columns: 选中的列
+            selected_columns: 选中的列请求列表，元素为 (类型, 列名)
             render_complete_callback: 渲染完成后的回调，接收 (success: bool, cancelled: bool) 参数
         """
         def do_render():
@@ -511,7 +789,8 @@ class CompareTab(BaseTab):
                         valid_indices = [i for i, v in enumerate(y_data) if v is not None]
 
                         if valid_indices:
-                            label = f"{file_name.replace('.csv', '')} - {col_name}"
+                            _, req_name = col_name
+                            label = f"{file_name.replace('.csv', '')} - {req_name}"
                             x_valid = [x_data[i] for i in valid_indices]
                             y_valid = [y_data[i] for i in valid_indices]
 
@@ -539,7 +818,8 @@ class CompareTab(BaseTab):
                 render_complete_callback(success=True, cancelled=False)
 
             except Exception as e:
-                self.app_context['root'].after(0, lambda: self._on_compare_error(str(e)))
+                error_msg = str(e)
+                self.app_context['root'].after(0, lambda: self._on_compare_error(error_msg))
 
         self.app_context['root'].after(0, do_render)
 
@@ -558,6 +838,8 @@ class CompareTab(BaseTab):
             self._is_comparing = False
             self._compare_btn.config(state=tk.NORMAL)
             self._cancel_btn.config(state=tk.DISABLED)
+            if self._export_btn is not None:
+                self._export_btn.config(state=tk.NORMAL)
             self._progress_bar.config(value=0 if cancelled else 100)
             self._progress_label.config(text="已取消" if cancelled else "完成")
             self.compare_status_label.config(
@@ -572,11 +854,154 @@ class CompareTab(BaseTab):
             self._is_comparing = False
             self._compare_btn.config(state=tk.NORMAL)
             self._cancel_btn.config(state=tk.DISABLED)
+            if self._export_btn is not None:
+                self._export_btn.config(state=tk.NORMAL)
             self._progress_label.config(text="错误")
             self.compare_status_label.config(text=f"对比出错: {error_msg}")
             messagebox.showerror("错误", f"对比操作出错:\n{error_msg}")
 
         self.app_context['root'].after(0, do_error)
+
+    def _export_selected_columns(self):
+        """将当前选中的文件和数据列导出为新的CSV文件（宽表并排，完整原始数据）"""
+        if self._is_exporting or self._is_comparing:
+            return
+
+        selected_files = self.compare_file_listbox.curselection()
+        if not selected_files:
+            messagebox.showwarning("提示", "请至少选择一个文件")
+            return
+
+        selected_columns = self._get_column_requests()
+        if not selected_columns:
+            messagebox.showwarning("提示", "请至少选择一个数据列")
+            return
+
+        file_names = [self.compare_file_listbox.get(i) for i in selected_files]
+        output_dir = self.app_context.get('output_dir', '')
+
+        # 导出前检查时间列类型是否一致（轻量读取表头）
+        time_col_names = set()
+        for file_name in file_names:
+            for col in read_csv_header(os.path.join(output_dir, file_name)):
+                if is_time_column(col):
+                    time_col_names.add(col)
+                    break
+        if len(time_col_names) > 1:
+            names = '、'.join(sorted(time_col_names))
+            proceed = messagebox.askokcancel(
+                "警告",
+                f"选中文件的时间列类型不一致（{names}）。\n"
+                "导出将以第一个文件的时间列为准，各文件数据按行号对齐，"
+                "时间可能不匹配。\n\n是否继续导出？")
+            if not proceed:
+                return
+
+        output_path = filedialog.asksaveasfilename(
+            title="导出选中数据列",
+            defaultextension=".csv",
+            initialfile="selected_export.csv",
+            initialdir=output_dir or None,
+            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+        )
+        if not output_path:
+            return
+
+        self._is_exporting = True
+        self._compare_btn.config(state=tk.DISABLED)
+        self._export_btn.config(state=tk.DISABLED)
+        self._progress_bar.config(value=0)
+        self._progress_label.config(text="准备导出...")
+
+        self._export_thread = threading.Thread(
+            target=self._async_export,
+            args=(file_names, selected_columns, output_path),
+            daemon=True
+        )
+        self._export_thread.start()
+
+    def _async_export(self, file_names: List[str],
+                      selected_columns: List[Tuple[str, str]], output_path: str):
+        """后台线程：加载选中文件并将选中数据列导出为宽表CSV"""
+        try:
+            output_dir = self.app_context.get('output_dir', '')
+            total_files = len(file_names)
+
+            # 收集各文件数据：仅持有列数据列表引用，
+            # 缓存淘汰时loader.data字典被清空也不影响已提取的列表
+            file_data = OrderedDict()
+            skipped_files = []
+            for i, file_name in enumerate(file_names):
+                file_path = os.path.join(output_dir, file_name)
+                loader = self._get_file_loader(file_path)
+                if loader is None:
+                    skipped_files.append(file_name)
+                    continue
+
+                time_col = loader.get_time_column()
+                req_cols = {}
+                used_columns = set()
+                for req_type, target_col in selected_columns:
+                    matching = resolve_matching_column(loader, req_type, target_col, time_col)
+                    if matching and matching not in used_columns:
+                        used_columns.add(matching)
+                        req_cols[(req_type, target_col)] = matching
+
+                file_data[file_name] = {
+                    'time_col': time_col,
+                    'time_values': loader.data[time_col] if time_col else [],
+                    'req_cols': req_cols,
+                    'col_values': {req: loader.data[raw]
+                                   for req, raw in req_cols.items()},
+                }
+                self._update_progress(i + 1, total_files,
+                                      f"已加载 {i + 1}/{total_files} 个文件")
+
+            # 共用时间列取第一个包含时间列的文件；导出列按文件顺序 × 列请求顺序
+            time_source = next((fd for fd in file_data.values() if fd['time_col']), None)
+            time_header = time_source['time_col'] if time_source else None
+            time_values = time_source['time_values'] if time_source else []
+
+            export_columns = []
+            for file_name, fd in file_data.items():
+                stem = file_name[:-4] if file_name.lower().endswith('.csv') else file_name
+                for req, raw_col in fd['req_cols'].items():
+                    export_columns.append((stem, raw_col, fd['col_values'][req]))
+
+            if not export_columns:
+                raise RuntimeError("选中的数据列在所有文件中均未匹配到")
+
+            max_rows, col_count = write_export_csv(
+                output_path, time_header, time_values, export_columns,
+                progress_callback=lambda cur, total: self._update_progress(
+                    cur, total, f"正在写入数据 {cur}/{total} 行"))
+
+            summary = (f"数据已成功导出到:\n{output_path}\n\n"
+                       f"共 {max_rows} 行 × {col_count} 列")
+            if skipped_files:
+                summary += f"\n\n以下文件加载失败已跳过: {', '.join(skipped_files)}"
+            self._on_export_complete(True, summary)
+        except Exception as e:
+            self._on_export_complete(False, str(e))
+
+    def _on_export_complete(self, success: bool, message: str):
+        """导出完成回调（主线程执行UI更新）"""
+        def do_complete():
+            self._is_exporting = False
+            self._compare_btn.config(state=tk.NORMAL)
+            self._export_btn.config(state=tk.NORMAL)
+            if success:
+                self._progress_bar.config(value=100)
+                self._progress_label.config(text="导出完成")
+                self.compare_status_label.config(text="导出完成")
+                messagebox.showinfo("成功", message)
+            else:
+                self._progress_bar.config(value=0)
+                self._progress_label.config(text="导出失败")
+                self.compare_status_label.config(text=f"导出失败: {message}")
+                messagebox.showerror("错误", f"导出失败:\n{message}")
+
+        self.app_context['root'].after(0, do_complete)
 
     def _add_to_cache(self, file_path: str, loader: CSVDataLoader):
         """添加文件到缓存"""
@@ -594,7 +1019,7 @@ class CompareTab(BaseTab):
         if not selected_files:
             return
 
-        selected_columns = [col for col, var in self.compare_column_vars.items() if var.get()]
+        selected_columns = self._get_column_requests()
         if not selected_columns:
             return
 
@@ -669,6 +1094,23 @@ class CompareTab(BaseTab):
             self.compare_zoom_label.config(text=f"{int(self.compare_zoom_level * 100)}%")
             self._generate_chart()
 
+    def _on_mouse_move(self, event):
+        """鼠标移动事件处理：更新数据点提示"""
+        if self._datatip_var is None or not self._datatip_var.get():
+            return
+        if not event.inaxes or event.xdata is None or event.ydata is None:
+            self.chart_manager.clear_crosshair()
+            self.chart_manager.draw_idle()
+            return
+        self.chart_manager.update_datatip(event.xdata, event.ydata)
+        self.chart_manager.draw_idle()
+
+    def _toggle_datatip(self):
+        """切换数据点提示显示状态"""
+        if self._datatip_var is not None and not self._datatip_var.get():
+            self.chart_manager.clear_crosshair()
+            self.chart_manager.draw_idle()
+
     def _reset_zoom(self):
         """重置缩放"""
         self.compare_zoom_level = 1.0
@@ -689,6 +1131,9 @@ class CompareTab(BaseTab):
         if self._compare_thread and self._compare_thread.is_alive():
             self._compare_thread.join(timeout=1.0)
 
+        if self._export_thread and self._export_thread.is_alive():
+            self._export_thread.join(timeout=1.0)
+
         if self.chart_manager:
             self.chart_manager.destroy()
             self.chart_manager = None
@@ -697,6 +1142,11 @@ class CompareTab(BaseTab):
             loader.clear()
         self._loaded_files.clear()
         self._compare_time_data = []
+
+        self._column_pool = {}
+        self._pool_file_count = 0
+        self._search_results = []
+        self._selected_unified_columns = []
 
     def refresh_files(self):
         """刷新文件列表（公共接口）"""

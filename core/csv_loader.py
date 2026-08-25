@@ -38,10 +38,74 @@ def _get_local_epoch_offset() -> float:
     return _LOCAL_EPOCH_OFFSET
 
 
+def read_csv_column_sample(file_path: str, sample_rows: int = 50) -> Optional[List[str]]:
+    """
+    轻量读取CSV文件的列信息（仅读取表头和少量采样数据行）
+
+    用于在不加载整个文件的情况下，获取可用于绘图的数值列名（排除时间列）。
+
+    Args:
+        file_path: CSV文件路径
+        sample_rows: 采样数据行数，用于判断列是否为数值列
+
+    Returns:
+        Optional[List[str]]: 数值列名列表（排除时间列），读取失败返回None
+    """
+    for encoding in CSVDataLoader.SUPPORTED_ENCODINGS:
+        try:
+            with open(file_path, 'r', newline='', encoding=encoding) as f:
+                reader = csv.reader(f)
+                try:
+                    columns = next(reader)
+                except StopIteration:
+                    return None
+
+                samples = []
+                for i, row in enumerate(reader):
+                    if i >= sample_rows:
+                        break
+                    samples.append(row)
+
+            time_col = None
+            for col in columns:
+                col_lower = col.lower()
+                if col_lower in ('time', 'times', 'time[s]'):
+                    time_col = col
+                    break
+
+            # 采样值全部可解析为浮点数且至少存在一个非空值的列视为数值列
+            numeric_cols = []
+            for idx, col in enumerate(columns):
+                if col == time_col:
+                    continue
+                is_numeric = True
+                has_value = False
+                for row in samples:
+                    if idx >= len(row):
+                        continue
+                    value = row[idx].strip()
+                    if not value:
+                        continue
+                    has_value = True
+                    try:
+                        float(value)
+                    except ValueError:
+                        is_numeric = False
+                        break
+                if has_value and is_numeric:
+                    numeric_cols.append(col)
+            return numeric_cols
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            return None
+    return None
+
+
 class CSVDataLoader:
     """
     CSV数据加载器
-    
+
     负责加载CSV文件并解析数据，提供数据访问接口
     
     Attributes:

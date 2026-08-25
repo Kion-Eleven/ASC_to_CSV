@@ -35,6 +35,7 @@
 import os
 import shutil
 import tempfile
+from datetime import datetime
 from typing import Optional, Callable, List, Dict, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -200,7 +201,8 @@ class MultiASCConverter:
 
         parser = ASCParser(
             sample_interval=self.config.sample_interval,
-            debug=self.config.debug
+            debug=self.config.debug,
+            debug_callback=self._log
         )
 
         def progress_callback(progress: float, line_count: int):
@@ -209,6 +211,13 @@ class MultiASCConverter:
 
         if not parser.parse(asc_file, message_map, progress_callback):
             return False, "ASC解析失败", {}
+
+        # 输出该文件起始时间的解析结果（便于确认date行是否解析成功）
+        if parser.start_time > 0:
+            start_str = datetime.fromtimestamp(parser.start_time).strftime('%Y/%m/%d %H:%M:%S')
+            self._log(f"  起始时间: {start_str}")
+        else:
+            self._log("  警告: 未解析到date行起始时间，该文件时间列将从0开始")
 
         processor = EnhancedDataProcessor()
         processor.aggregate(parser.sampled_data)
@@ -267,7 +276,10 @@ class MultiASCConverter:
             return True, rows
 
         merger = CSVFileMerger()
-        result = merger.merge_csv_files(temp_csvs, output_path)
+        result = merger.merge_csv_files(
+            temp_csvs, output_path,
+            progress_callback=lambda msg: self._log(f"  {msg}")
+        )
 
         return result.success, result.total_rows
 

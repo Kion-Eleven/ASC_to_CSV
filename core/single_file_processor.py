@@ -162,7 +162,8 @@ class SingleFileProcessor:
 
         self.asc_parser = ASCParser(
             sample_interval=self.config.sample_interval,
-            debug=self.config.debug
+            debug=self.config.debug,
+            debug_callback=lambda msg: self._log(log_callback, msg)
         )
 
         def internal_progress_callback(progress: float, line_count: int):

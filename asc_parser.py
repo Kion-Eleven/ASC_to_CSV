@@ -30,29 +30,49 @@ class ASCParser:
     )
     DATE_PATTERN = re.compile(r'^date\s+(.+)$')
     DATE_FORMAT = 'date %a %b %d %I:%M:%S %p %Y'
+    # 中文格式 date 行，如: "date 周六 8月 15 09:33:39 上午 2026"
+    # 容错: 星期/周 前缀、日后的"日"、秒后毫秒、年后的"年"或时区文本(如"中国标准时间")
+    CHINESE_DATE_PATTERN = re.compile(
+        r'^date\s+(?:周|星期)[一二三四五六日天]\s*'
+        r'(\d{1,2})月\s*(\d{1,2})日?\s+'
+        r'(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?\s+'
+        r'(上午|下午|中午|凌晨|清晨|傍晚|晚上)\s+(\d{4})年?(?:\s.*)?$'
+    )
     MAX_MEMORY_SIGNALS = 10000
     MAX_MEMORY_TIMESTAMPS = 100000
     PROGRESS_UPDATE_INTERVAL = 10000
     MEMORY_CHECK_INTERVAL = 50000
     
-    def __init__(self, sample_interval: float = 0.1, debug: bool = False):
+    def __init__(self, sample_interval: float = 0.1, debug: bool = False,
+                 debug_callback: Optional[Callable[[str], None]] = None):
         """
         初始化ASC解析器
-        
+
         Args:
             sample_interval: 采样间隔（秒）
             debug: 是否启用调试模式
+            debug_callback: 调试信息回调函数
+                - 提供时调试/警告信息通过回调输出（GUI日志可见）
+                - 不提供时退回到 print()（仅终端可见）
         """
         self.sample_interval = sample_interval
         self.debug = debug
+        self._debug_callback = debug_callback
         self.sampled_data: Dict[float, Dict[str, list]] = {}
         self.found_signals: Set[str] = set()
         self.original_count: int = 0
         self.start_time: float = 0.0
-        self._memory_warning_shown = False
+        self._memory_warning_shown: bool = False
         self._line_count: int = 0
         self._file_size: int = 0
         self._last_progress: float = 0.0
+
+    def _debug_log(self, message: str) -> None:
+        """输出调试/警告信息：有回调走回调，否则打印到控制台"""
+        if self._debug_callback:
+            self._debug_callback(message)
+        else:
+            print(message)
     
     def parse(self, asc_file: str, message_map: Dict, 
               progress_callback: Optional[Callable[[float, int], None]] = None) -> bool:
@@ -152,27 +172,73 @@ class ASCParser:
     def _parse_date_line(self, line: str) -> None:
         """
         解析ASC文件第一行的 date 时间
-        
-        ASC文件第一行格式示例: "date Thu Aug 13 01:52:11 PM 2026"
-        
+
+        支持的格式：
+            - 英文: "date Thu Aug 13 01:52:11 PM 2026"
+            - 中文: "date 周六 8月 15 09:33:39 上午 2026"
+            - 容错: UTF-8 BOM前缀、秒后毫秒、年后时区文本(如"中国标准时间")
+
         Args:
             line: ASC文件的第一行文本
         """
-        line = line.strip()
+        # 去除UTF-8 BOM（部分工具导出的文件首行带BOM，会导致 ^date 匹配失败）
+        line = line.lstrip('\ufeff').strip()
         match = self.DATE_PATTERN.match(line)
         if not match:
             if self.debug:
-                print(f"  ASC文件未找到 date 行，将使用时间戳从0开始")
+                self._debug_log(f"  ASC文件未找到 date 行，将使用时间戳从0开始")
             return
-        
+
+        dt = None
         try:
             dt = datetime.strptime(line, self.DATE_FORMAT)
+        except ValueError:
+            # 英文格式解析失败，尝试中文格式（如CANoe中文环境导出的ASC文件）
+            dt = self._parse_chinese_date(line)
+
+        if dt is not None:
             self.start_time = dt.timestamp()
             if self.debug:
-                print(f"  解析ASC起始时间: {dt} (epoch: {self.start_time})")
-        except ValueError as e:
-            if self.debug:
-                print(f"  date行解析失败: {e}，将使用时间戳从0开始")
+                self._debug_log(f"  解析ASC起始时间: {dt} (epoch: {self.start_time})")
+        else:
+            # 始终输出警告（含repr以暴露不可见字符），便于定位格式差异
+            self._debug_log(f"警告: date行解析失败: {line!r}，该文件时间列将从0开始")
+
+    def _parse_chinese_date(self, line: str) -> Optional[datetime]:
+        """
+        解析中文格式的 date 行
+
+        格式示例: "date 周六 8月 15 09:33:39 上午 2026"
+        （星期几仅作占位，不参与构造时间）
+
+        Args:
+            line: date 行文本
+
+        Returns:
+            Optional[datetime]: 解析成功返回 datetime，失败返回 None
+        """
+        match = self.CHINESE_DATE_PATTERN.match(line)
+        if not match:
+            return None
+
+        month = int(match.group(1))
+        day = int(match.group(2))
+        hour = int(match.group(3))
+        minute = int(match.group(4))
+        second = int(match.group(5))
+        am_pm = match.group(6)
+        year = int(match.group(7))
+
+        # 12小时制转24小时制
+        if am_pm in ('下午', '中午', '傍晚', '晚上') and hour < 12:
+            hour += 12
+        elif am_pm in ('上午', '凌晨', '清晨') and hour == 12:
+            hour = 0
+
+        try:
+            return datetime(year, month, day, hour, minute, second)
+        except ValueError:
+            return None
     
     def _parse_line(self, line: str, message_map: Dict) -> None:
         """
@@ -239,13 +305,13 @@ class ASCParser:
                 
         except ValueError as e:
             if self.debug:
-                print(f"  数据格式错误: {e}")
+                self._debug_log(f"  数据格式错误: {e}")
         except KeyError as e:
             if self.debug:
-                print(f"  消息映射错误: {e}")
+                self._debug_log(f"  消息映射错误: {e}")
         except Exception as e:
             if self.debug:
-                print(f"  解码错误: {type(e).__name__}: {e}")
+                self._debug_log(f"  解码错误: {type(e).__name__}: {e}")
     
     def get_statistics(self) -> Tuple[int, int, int]:
         """

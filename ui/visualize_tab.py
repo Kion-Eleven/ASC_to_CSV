@@ -173,7 +173,7 @@ class VisualizeTab(BaseTab):
         self.scroll_scale.pack(side=tk.LEFT, padx=5)
 
         self.crosshair_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(zoom_frame, text="显示十字参考线", variable=self.crosshair_var,
+        ttk.Checkbutton(zoom_frame, text="显示数据提示", variable=self.crosshair_var,
                         command=self._toggle_crosshair).pack(side=tk.LEFT, padx=20)
 
         self.perf_mode_label = ttk.Label(zoom_frame, text="", foreground="orange", width=15)
@@ -490,11 +490,10 @@ class VisualizeTab(BaseTab):
             return
         
         if self.crosshair_enabled:
-            self.chart_manager.update_crosshair(x_mouse, y_mouse)
-            self.coord_label.config(text=f"坐标: X={x_mouse:.4f}, Y={y_mouse:.4f}")
+            self.chart_manager.update_datatip(x_mouse, y_mouse)
         else:
             self.chart_manager.clear_crosshair()
-            self.coord_label.config(text=f"坐标: X={x_mouse:.4f}, Y={y_mouse:.4f}")
+        self.coord_label.config(text=f"坐标: X={x_mouse:.4f}, Y={y_mouse:.4f}")
         
         self.chart_manager.draw_idle()
     
