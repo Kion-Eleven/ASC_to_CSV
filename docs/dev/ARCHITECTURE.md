@@ -1,6 +1,6 @@
 # 技术架构
 
-**版本**：v1.1.0
+**版本**：v1.1.1
 
 ## 概述
 
@@ -54,6 +54,6 @@ main_app.py · ui/{convert,visualize,compare,export}_tab
 
 ## 技术栈
 
-Python >= 3.8 · cantools · matplotlib · numpy · tkinter · PyInstaller（dev）
+Python >= 3.10 · cantools · matplotlib · numpy · tkinter · PyInstaller（dev）
 
 详见 [CONTRIBUTING.md](CONTRIBUTING.md)、[CHANGELOG.md](CHANGELOG.md)。

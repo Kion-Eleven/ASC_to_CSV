@@ -2,6 +2,24 @@
 
 版本号见 [`version.py`](../../version.py)。
 
+## [1.1.1] - 2026-09-10
+
+### 修复
+
+- ASC 编码探测：GBK 文件头部为纯 ASCII 时，读到中文字符中途崩溃导致整个文件解析失败；改为完整解析重试机制（`asc_parser._parse_with_encoding`）
+- CI/CD：测试矩阵移除 Python 3.9（`cantools>=41` 要求 >= 3.10）；最低版本要求提升为 Python 3.10
+- CI/CD：构建产物路径与 onedir 打包模式对齐（`dist/ASCtoCSV/` 文件夹）
+- CI/CD：`main_app.spec` 纳入版本控制（此前被 `.gitignore` 的 `*.spec` 忽略，CI 构建找不到文件）
+
+### 新增
+
+- CI/CD：推送到 `main` 后自动发布/更新 `latest` 预发布版（`ASCtoCSV-latest.zip`），产物永久可下载
+- `main_app.spec` 已加入仓库，打包配置（排除模块、onedir 模式）与 CI 一致
+
+### 移除
+
+- `ASCParser.parse_multiple`（无调用方的死代码，多文件模式走 `MultiASCConverter` 架构）
+
 ## [1.1.0] - 当前
 
 ### 新增

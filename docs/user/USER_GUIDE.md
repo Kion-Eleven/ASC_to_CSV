@@ -319,16 +319,15 @@ Time[s],BMS.dbc::BatP3_Status::PackSOC[%],BMS.dbc::BatP3_Status::PackVolt[V]
 | 运行方式 | 依赖软件 | 说明 |
 |----------|----------|------|
 | **EXE版本** | 无 | 独立可执行文件，无需额外依赖 |
-| **源码版本** | Python 3.8+ | 需要安装Python环境和依赖包 |
+| **源码版本** | Python 3.10+ | 需要安装Python环境和依赖包 |
 
 ### 3.3 Python依赖包（源码版本）
 
 | 包名 | 版本要求 | 用途 |
 |------|----------|------|
-| **cantools** | 41.0.0 | DBC文件解析 |
+| **cantools** | 41.0.0 | DBC文件解析（要求 Python >= 3.10） |
 | **matplotlib** | 3.8.4 | 数据可视化 |
 | **numpy** | 1.26.4 | 数值计算 |
-| **scipy** | 1.13.0 | 科学计算（可选） |
 | **PyInstaller** | 6.6.0 | 打包工具（开发用） |
 
 ---
@@ -370,8 +369,10 @@ Time[s],BMS.dbc::BatP3_Status::PackSOC[%],BMS.dbc::BatP3_Status::PackVolt[V]
 #### 步骤一：获取软件
 
 ```
-1. 从发布页面下载 ASCtoCSV.exe 文件
-2. 建议保存路径: D:\Tools\ASCtoCSV\
+1. 从发布页面下载 ASCtoCSV-latest.zip 压缩包
+   地址: https://github.com/MrMcDonaldXC/ASC_to_CSV/releases/tag/latest
+   （每次代码更新后自动重新构建，始终为最新版本）
+2. 解压到目标目录，建议路径: D:\Tools\ASCtoCSV\
 ```
 
 #### 步骤二：准备目录结构
@@ -380,8 +381,10 @@ Time[s],BMS.dbc::BatP3_Status::PackSOC[%],BMS.dbc::BatP3_Status::PackVolt[V]
 建议的目录结构:
 
 D:\Tools\ASCtoCSV\
-├── ASCtoCSV.exe          ← 主程序
-├── config.json           ← 配置文件（首次运行自动生成）
+├── ASCtoCSV\             ← 解压出的程序文件夹（onedir 模式）
+│   ├── ASCtoCSV.exe      ← 主程序（双击运行）
+│   └── ...               ← 程序依赖文件（勿删除，需整体分发）
+├── config.json           ← 配置文件（可选，GUI 中也可配置并保存）
 ├── dbc\                  ← DBC文件目录
 │   ├── BMS.dbc
 │   ├── VCU.dbc
@@ -400,11 +403,11 @@ D:\Tools\ASCtoCSV\
 #### 步骤三：验证安装
 
 ```
-1. 双击 ASCtoCSV.exe
+1. 进入 ASCtoCSV 文件夹，双击 ASCtoCSV.exe
 2. 如果出现以下界面，说明安装成功:
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  系统集成测试数据处理 v1.0.0                              [_][□][×]        │
+│  系统集成测试数据解析 v1.1.1                              [_][□][×]        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┬─────────────────┬─────────────────┐                   │
 │  │  数据转换 │ 数据可视化 │ 数据对比 │ 数据导出      │                   │
@@ -423,14 +426,14 @@ D:\Tools\ASCtoCSV\
 
 ```
 1. 访问 Python 官网: https://www.python.org/downloads/
-2. 下载 Python 3.9 或更高版本
+2. 下载 Python 3.10 或更高版本
 3. 安装时务必勾选 "Add Python to PATH"
 
    ┌─────────────────────────────────────────────────────────────────────┐
-   │  Python 3.9.x Setup                                                 │
+   │  Python 3.10.x Setup                                                │
    │  ┌─────────────────────────────────────────────────────────────┐   │
    │  │                                                               │   │
-   │  │  ☑ Add Python 3.9 to PATH          ← 必须勾选               │   │
+   │  │  ☑ Add Python 3.10 to PATH         ← 必须勾选               │   │
    │  │  ☑ Install pip                                             │   │
    │  │  ☑ Install for all users                                   │   │
    │  │                                                               │   │
@@ -443,7 +446,7 @@ D:\Tools\ASCtoCSV\
    
    python --version
    
-   应显示: Python 3.9.x
+   应显示: Python 3.10.x 或更高
 ```
 
 #### 步骤二：获取源码
@@ -491,9 +494,9 @@ pip install -r requirements.txt
 Collecting cantools==41.0.0
   Downloading cantools-41.0.0-py2.py3-none-any.whl
 Collecting matplotlib==3.8.4
-  Downloading matplotlib-3.8.4-cp39-win_amd64.whl
+  Downloading matplotlib-3.8.4-cp311-win_amd64.whl
 Collecting numpy==1.26.4
-  Downloading numpy-1.26.4-cp39-win_amd64.whl
+  Downloading numpy-1.26.4-cp311-win_amd64.whl
 ...
 Successfully installed cantools-41.0.0 matplotlib-3.8.4 numpy-1.26.4 ...
 ```
@@ -589,7 +592,7 @@ python main_app.py
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  系统集成测试数据处理 v1.0.0                              [_][□][×]        │
+│  系统集成测试数据解析 v1.1.1                              [_][□][×]        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ┌─────────────────┬─────────────────┬─────────────────┐                    │
 │ │  数据转换 │ 数据可视化 │ 数据对比 │ 数据导出 │  ← 标签页导航      │
@@ -1540,7 +1543,7 @@ A: 当前版本暂不支持直接导出，替代方法:
 
 1. 软件版本
    • 在软件标题栏查看版本号
-   • 示例: v1.0.0
+   • 示例: v1.1.1
 
 2. 系统环境
    • 操作系统: Windows 10/11
@@ -1758,6 +1761,21 @@ Time[s],BMS.dbc::BatP3_Status::PackSOC[%],BMS.dbc::BatP3_Status::PackVolt[V]
 | **CAN总线协议** | https://en.wikipedia.org/wiki/CAN_bus |
 
 ### 9.5 版本更新记录
+
+#### v1.1.1 (2026年9月)
+
+**修复**
+- 修复 GBK 编码 ASC 文件解析中途崩溃的问题
+- CI/CD 全面修复，构建产物可正常生成
+
+**新增**
+- GitHub 自动发布 latest 预发布版，随时可下载最新打包程序
+
+#### v1.1.0
+
+**新功能**
+- 数据导出标签页（CSV 列筛选导出）
+- 多 ASC 文件按时间戳拼接转换
 
 #### v1.0.0 (2026年3月)
 

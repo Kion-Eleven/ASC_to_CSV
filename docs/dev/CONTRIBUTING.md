@@ -38,7 +38,7 @@ python convert_icon.py
 pyinstaller main_app.spec --clean
 ```
 
-或 `build.bat` → `dist/ASCtoCSV.exe`
+或 `build.bat` → `dist/ASCtoCSV/`（onedir 文件夹，内含 `ASCtoCSV.exe`）
 
 ## 文档
 

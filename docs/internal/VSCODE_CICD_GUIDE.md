@@ -627,7 +627,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -653,7 +653,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ASCtoCSV-Windows
-          path: dist/ASCtoCSV.exe
+          path: dist/ASCtoCSV/   # onedir 模式输出为文件夹
 ```
 
 ---
@@ -810,7 +810,7 @@ build:
       uses: actions/upload-artifact@v4
       with:
         name: ASCtoCSV-Windows
-        path: dist/ASCtoCSV.exe
+        path: dist/ASCtoCSV/   # onedir 模式输出为文件夹
         retention-days: 30
 ```
 

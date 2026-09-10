@@ -2,7 +2,7 @@
 
 将 CAN 总线 ASC 日志（Vector CANoe/CANalyzer 格式）按 DBC 解码为 CSV，并提供可视化、对比与列导出功能。
 
-**当前版本**：v1.1.0（见 [`version.py`](version.py)）
+**当前版本**：v1.1.1（见 [`version.py`](version.py)）
 
 ## 功能概览
 
@@ -96,7 +96,13 @@ build.bat
 # 或: python convert_icon.py && pyinstaller main_app.spec --clean
 ```
 
-产物：`dist/ASCtoCSV.exe`。可选：放置 `resource/icon.png` 后运行 `convert_icon.py` 生成 `icon.ico`。
+产物：`dist/ASCtoCSV/` 文件夹（onedir 模式，内含 `ASCtoCSV.exe` 及全部依赖，整体分发）。可选：放置 `resource/icon.png` 后运行 `convert_icon.py` 生成 `icon.ico`。
+
+## 下载已构建产物
+
+- **最新构建（自动更新）**：每次推送到 `main` 后 CI 自动打包并更新 [latest 预发布版](https://github.com/MrMcDonaldXC/ASC_to_CSV/releases/tag/latest)，下载 `ASCtoCSV-latest.zip` 解压即用，无需安装 Python。
+- **CI 构件**：Actions 页面各运行的 Artifacts（需登录 GitHub，30 天过期）。
+- **正式版本**：手动创建 Release（打 tag）后 CI 自动上传对应 zip。
 
 ## 文档索引
 
