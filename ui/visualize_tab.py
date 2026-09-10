@@ -387,10 +387,14 @@ class VisualizeTab(BaseTab):
 
         if total_points > self._max_data_points:
             self.perf_mode_label.config(text=f"性能模式: {total_points}点")
-            self.chart_manager.set_max_render_points(self._max_data_points)
         else:
             self.perf_mode_label.config(text="")
-            self.chart_manager.set_max_render_points(total_points)
+
+        # 渲染点数预算 ≈ 每像素2点，超出部分走min-max降采样：
+        # 保留波形包络、避免混叠锯齿，同时大幅减少实际渲染点数
+        fig = self.chart_manager.figure
+        render_budget = int(fig.get_size_inches()[0] * fig.dpi * 2)
+        self.chart_manager.set_max_render_points(render_budget)
 
         visible_points = max(1, int(total_points / self.zoom_level))
         visible_points = min(visible_points, self._max_data_points)

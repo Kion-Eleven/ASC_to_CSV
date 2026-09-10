@@ -260,11 +260,16 @@ class ChartManager:
 
     def _downsample_data(self, x_data: List, y_data: List) -> Tuple[List, List]:
         """
-        降采样数据以优化渲染性能
+        min-max 降采样：将数据分成若干桶，每桶仅保留最小值和最大值两个点
+
+        相比等间隔抽样：
+        - 完整保留波形包络，尖峰/毛刺不会被跳过
+        - 消除高密度绘制时的混叠锯齿（点数远超像素数导致的视觉失真）
+        - 渲染点数可控（约每像素2个点），保证缩放/滚动流畅
 
         Args:
             x_data: X轴数据
-            y_data: Y轴数据
+            y_data: Y轴数据（可含None表示缺失）
 
         Returns:
             Tuple[List, List]: 降采样后的数据
@@ -274,10 +279,47 @@ class ChartManager:
         if total_points <= self.max_render_points:
             return x_data, y_data
 
-        step = total_points / self.max_render_points
-        indices = [int(i * step) for i in range(self.max_render_points)]
+        bucket_count = max(1, self.max_render_points // 2)
+        bucket_size = total_points / bucket_count
 
-        return ([x_data[i] for i in indices], [y_data[i] for i in indices])
+        out_x: List = []
+        out_y: List = []
+        for b in range(bucket_count):
+            start = int(b * bucket_size)
+            end = max(start + 1, int((b + 1) * bucket_size))
+
+            min_v = None
+            max_v = None
+            min_i = -1
+            max_i = -1
+            for i in range(start, end):
+                v = y_data[i]
+                if v is None:
+                    continue
+                if min_v is None or v < min_v:
+                    min_v = v
+                    min_i = i
+                if max_v is None or v > max_v:
+                    max_v = v
+                    max_i = i
+
+            if min_i < 0:
+                continue  # 整桶均为缺失值，跳过以保留断点
+
+            # 按原始索引顺序输出，保证线形不失真
+            if min_i <= max_i:
+                out_x.append(x_data[min_i])
+                out_y.append(y_data[min_i])
+                if max_i != min_i:
+                    out_x.append(x_data[max_i])
+                    out_y.append(y_data[max_i])
+            else:
+                out_x.append(x_data[max_i])
+                out_y.append(y_data[max_i])
+                out_x.append(x_data[min_i])
+                out_y.append(y_data[min_i])
+
+        return out_x, out_y
 
     def set_max_render_points(self, max_points: int):
         """

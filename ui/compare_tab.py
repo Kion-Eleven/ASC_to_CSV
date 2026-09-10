@@ -805,10 +805,11 @@ class CompareTab(BaseTab):
                     render_complete_callback(success=False, cancelled=True)
                     return
 
-                if max_points > self._max_data_points:
-                    self.chart_manager.set_max_render_points(self._max_data_points)
-                else:
-                    self.chart_manager.set_max_render_points(max_points)
+                # 渲染点数预算 ≈ 每像素2点，超出部分走min-max降采样：
+                # 保留波形包络、避免混叠锯齿，同时大幅减少实际渲染点数
+                fig = self.chart_manager.figure
+                render_budget = int(fig.get_size_inches()[0] * fig.dpi * 2)
+                self.chart_manager.set_max_render_points(render_budget)
 
                 self.chart_manager.set_labels("时间 [s]", "数值", "多文件数据对比")
                 self.chart_manager.add_legend()
