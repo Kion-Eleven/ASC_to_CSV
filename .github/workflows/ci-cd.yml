@@ -93,7 +93,8 @@ jobs:
     name: 构建应用
     runs-on: windows-latest
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # main分支推送 或 手动发布Release 时构建
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'release'
 
     steps:
       - name: 检出代码
@@ -125,6 +126,44 @@ jobs:
           retention-days: 30
 
   # ============================================================================
+  # 自动发布 latest 预发布版（每次main推送后更新，产物永久可下载）
+  # ============================================================================
+  release-latest:
+    name: 发布latest版本
+    runs-on: windows-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ASCtoCSV-Windows
+          path: dist/ASCtoCSV
+
+      - name: 创建发布包
+        run: |
+          Compress-Archive -Path dist/ASCtoCSV -DestinationPath ASCtoCSV-latest.zip
+
+      - name: 删除旧的latest版本
+        run: gh release delete latest --yes --cleanup-tag
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 发布latest版本
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest (最新构建)
+          prerelease: true
+          files: ASCtoCSV-latest.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================================
   # 发布Release
   # ============================================================================
   release:
@@ -132,6 +171,8 @@ jobs:
     runs-on: windows-latest
     needs: build
     if: github.event_name == 'release'
+    permissions:
+      contents: write
 
     steps:
       - name: 检出代码
