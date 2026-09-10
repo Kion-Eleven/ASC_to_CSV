@@ -89,60 +89,30 @@ class ASCParser:
         """
         try:
             self._file_size = os.path.getsize(asc_file)
-            self._line_count = 0
-            self._last_progress = 0.0
-            
+
             encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1']
-            file_handle = None
             encoding_errors = []
 
+            # 注意：不能只读前1024字节探测编码——GBK文件头部常为纯ASCII，
+            # 会误判为UTF-8而在读到中文字符时中途失败。因此将完整解析过程
+            # 放入编码尝试循环，中途解码失败则重置数据并换编码重试。
             for encoding in encodings:
                 try:
-                    file_handle = open(asc_file, 'r', encoding=encoding, buffering=8192*4)
-                    file_handle.read(1024)
-                    file_handle.seek(0)
-                    break
+                    self._line_count = 0
+                    self._last_progress = 0.0
+                    self._parse_with_encoding(asc_file, encoding, message_map, progress_callback)
+                    return True
                 except (UnicodeDecodeError, UnicodeError) as e:
-                    if file_handle:
-                        file_handle.close()
                     encoding_errors.append(f"{encoding}: {str(e)}")
+                    self.clear()
                     continue
 
-            if file_handle is None:
-                error_detail = "; ".join(encoding_errors)
-                print(f"错误：无法识别文件编码 - {asc_file}")
-                print(f"尝试的编码: {encodings}")
-                print(f"编码错误详情: {error_detail}")
-                return False
-            
-            with file_handle as f:
-                # 读取第一行，解析起始时间
-                first_line = f.readline()
-                self._line_count += 1
-                self._parse_date_line(first_line)
-                
-                bytes_read = len(first_line.encode('utf-8', errors='ignore'))
-                for line in f:
-                    self._line_count += 1
-                    bytes_read += len(line.encode('utf-8', errors='ignore'))
-                    
-                    self._parse_line(line, message_map)
-                    
-                    if self._line_count % self.PROGRESS_UPDATE_INTERVAL == 0:
-                        if progress_callback and self._file_size > 0:
-                            progress = min(99.0, (bytes_read / self._file_size) * 100)
-                            if progress - self._last_progress >= 1.0:
-                                progress_callback(progress, self._line_count)
-                                self._last_progress = progress
-                    
-                    if self._line_count % self.MEMORY_CHECK_INTERVAL == 0:
-                        self._check_memory_usage()
-            
-            if progress_callback:
-                progress_callback(100.0, self._line_count)
-            
-            return True
-            
+            error_detail = "; ".join(encoding_errors)
+            print(f"错误：无法识别文件编码 - {asc_file}")
+            print(f"尝试的编码: {encodings}")
+            print(f"编码错误详情: {error_detail}")
+            return False
+
         except FileNotFoundError:
             print(f"错误：文件不存在 - {asc_file}")
             return False
@@ -157,6 +127,46 @@ class ASCParser:
             print(f"解析ASC文件失败: {type(e).__name__}: {e}")
             return False
     
+    def _parse_with_encoding(self, asc_file: str, encoding: str, message_map: Dict,
+                             progress_callback: Optional[Callable[[float, int], None]] = None) -> None:
+        """
+        使用指定编码解析整个ASC文件
+
+        Args:
+            asc_file: ASC文件路径
+            encoding: 文件编码
+            message_map: 消息映射
+            progress_callback: 进度回调函数
+
+        Raises:
+            UnicodeDecodeError: 文件编码与指定编码不符时抛出（由调用方换编码重试）
+        """
+        with open(asc_file, 'r', encoding=encoding, buffering=8192 * 4) as f:
+            # 读取第一行，解析起始时间
+            first_line = f.readline()
+            self._line_count += 1
+            self._parse_date_line(first_line)
+
+            bytes_read = len(first_line.encode('utf-8', errors='ignore'))
+            for line in f:
+                self._line_count += 1
+                bytes_read += len(line.encode('utf-8', errors='ignore'))
+
+                self._parse_line(line, message_map)
+
+                if self._line_count % self.PROGRESS_UPDATE_INTERVAL == 0:
+                    if progress_callback and self._file_size > 0:
+                        progress = min(99.0, (bytes_read / self._file_size) * 100)
+                        if progress - self._last_progress >= 1.0:
+                            progress_callback(progress, self._line_count)
+                            self._last_progress = progress
+
+                if self._line_count % self.MEMORY_CHECK_INTERVAL == 0:
+                    self._check_memory_usage()
+
+        if progress_callback:
+            progress_callback(100.0, self._line_count)
+
     def _check_memory_usage(self):
         """检查内存使用情况并发出警告"""
         if self._memory_warning_shown:
@@ -331,53 +341,10 @@ class ASCParser:
         self.sampled_data.clear()
         self.found_signals.clear()
         self.original_count = 0
+        self.start_time = 0.0
         self._memory_warning_shown = False
         self._line_count = 0
         gc.collect()
-
-    def parse_multiple(self, asc_files: list, message_map: Dict,
-                      progress_callback: Optional[Callable[[float, int], None]] = None) -> bool:
-        """
-        解析多个ASC文件（用于多文件拼接模式）
-
-        Args:
-            asc_files: ASC文件路径列表（已排序）
-            message_map: 消息映射（来自DBCLoader）
-            progress_callback: 进度回调函数，参数为(进度百分比, 已处理行数)
-
-        Returns:
-            bool: 是否成功解析所有文件
-        """
-        if not asc_files:
-            print("错误：ASC文件列表为空")
-            return False
-
-        if len(asc_files) == 1:
-            return self.parse(asc_files[0], message_map, progress_callback)
-
-        total_files = len(asc_files)
-        overall_success = True
-
-        for file_idx, asc_file in enumerate(asc_files):
-            file_name = os.path.basename(asc_file)
-
-            if progress_callback:
-                progress_callback(file_idx / total_files * 100, 0)
-
-            def partial_progress_callback(progress: float, line_count: int):
-                overall_file_progress = (file_idx + progress / 100) / total_files * 100
-                if progress_callback:
-                    progress_callback(overall_file_progress, line_count)
-
-            if not self.parse(asc_file, message_map, partial_progress_callback):
-                print(f"警告：解析文件失败: {asc_file}")
-                overall_success = False
-                continue
-
-        if progress_callback:
-            progress_callback(100.0, self._line_count)
-
-        return overall_success
 
     def __del__(self):
         """析构函数，确保资源释放"""

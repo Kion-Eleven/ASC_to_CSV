@@ -55,7 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12']
 
     steps:
       - name: 检出代码
@@ -121,7 +121,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ASCtoCSV-Windows
-          path: dist/ASCtoCSV.exe
+          path: dist/ASCtoCSV/
           retention-days: 30
 
   # ============================================================================
@@ -141,11 +141,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ASCtoCSV-Windows
-          path: dist
+          path: dist/ASCtoCSV
 
       - name: 创建发布包
         run: |
-          Compress-Archive -Path dist/ASCtoCSV.exe -DestinationPath ASCtoCSV-${{ github.event.release.tag_name }}.zip
+          Compress-Archive -Path dist/ASCtoCSV -DestinationPath ASCtoCSV-${{ github.event.release.tag_name }}.zip
 
       - name: 上传Release资产
         uses: softprops/action-gh-release@v1

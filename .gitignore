@@ -11,6 +11,7 @@ dist/
 
 # 打包相关
 *.spec
+!main_app.spec
 *.exe
 *.dll
 *.so

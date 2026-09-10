@@ -31,7 +31,7 @@ python main_app.py
 
 ## 系统要求
 
-- Python >= 3.8（推荐 3.11，与 CI 一致）
+- Python >= 3.10（推荐 3.11，与 CI 一致；cantools>=41 需要 3.10+）
 - 内存建议 4GB+
 - **GUI**：Windows 10/11 为主要测试平台；Linux/macOS 需安装中文字体以保证图表中文显示
 
